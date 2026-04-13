@@ -350,24 +350,21 @@ jobs:
             -backend-config="token=${{ env.AWS_SESSION_TOKEN }}" \
             -backend-config="region=${{ secrets.AWS_DEFAULT_REGION }}"
 
-      - name: Download plan artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: tfplan
-
-      - name: Import existing resources
-        run: |
-          aws secretsmanager restore-secret \
-            --secret-id prod/banking-app/db-credentials \
-            --region "${{ secrets.AWS_DEFAULT_REGION }}" 2>/dev/null || true
-          terraform import \
-            module.rds.aws_secretsmanager_secret.db_credentials \
-            prod/banking-app/db-credentials 2>/dev/null || true
-
-      - name: Terraform Apply
+      - name: Terraform Plan and Apply
         env:
           TF_VAR_db_password: ${{ secrets.TF_VAR_DB_PASSWORD }}
         run: |
+          echo "=== Running fresh terraform plan ==="
+          set +e
+          terraform plan             -var-file="${TF_ROOT}/environments/prod/terraform.tfvars"             -var="app_image_tag=${{ github.sha }}"             -out=tfplan             -detailed-exitcode
+          PLAN_EXIT=$?
+          set -e
+          if [ $PLAN_EXIT -eq 1 ]; then
+            echo "Terraform plan failed"
+            exit 1
+          fi
+
+          echo "=== Running terraform apply ==="
           set +e
           terraform apply -auto-approve tfplan
           EXIT_CODE=$?
