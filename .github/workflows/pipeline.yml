@@ -169,11 +169,9 @@ jobs:
                 },
                 "Action": "sts:AssumeRoleWithWebIdentity",
                 "Condition": {
-                  "StringLike": {
-                    "token.actions.githubusercontent.com:sub": "repo:${GITHUB_REPO}:*"
-                  },
                   "StringEquals": {
-                    "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+                    "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+                    "token.actions.githubusercontent.com:sub": "repo:${GITHUB_REPO}:ref:refs/heads/main"
                   }
                 }
               }
@@ -482,12 +480,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Debug OIDC token claims
-        run: |
-          TOKEN=$(curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN"             "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" |             python3 -c "import sys,json; t=json.load(sys.stdin)['value'];             import base64; parts=t.split('.');             pad=parts[1]+'='*(4-len(parts[1])%4);             print(json.dumps(json.loads(base64.b64decode(pad)), indent=2))" 2>/dev/null || echo "Could not decode token")
-          echo "OIDC Token Claims:"
-          echo "$TOKEN" | grep -E "sub|aud|iss|repo" || echo "Could not parse claims"
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
