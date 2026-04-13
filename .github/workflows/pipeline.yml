@@ -2,14 +2,27 @@
 # .github/workflows/pipeline.yml  –  Banking App CI/CD Pipeline
 #
 # Required GitHub Secrets (Settings -> Secrets and variables -> Actions):
-#   AWS_ACCESS_KEY_ID      - IAM user access key (for bootstrap only)
-#   AWS_SECRET_ACCESS_KEY  - IAM user secret key (for bootstrap only)
+#   AWS_ACCESS_KEY_ID      - IAM user access key (bootstrap uses this)
+#   AWS_SECRET_ACCESS_KEY  - IAM user secret key (bootstrap uses this)
 #   AWS_ACCOUNT_ID         - 603196661038
 #   AWS_DEFAULT_REGION     - ap-southeast-1
 #   AWS_ROLE_ARN           - arn:aws:iam::603196661038:role/prod-github-ci-role
+#                            NOTE: Bootstrap creates this role automatically.
+#                            On FIRST run use placeholder, update after bootstrap.
 #   ECS_CLUSTER_NAME       - prod-banking-cluster
 #   ECS_SERVICE_NAME       - prod-banking-service
-#   TF_VAR_DB_PASSWORD     - your DB password
+#   TF_VAR_DB_PASSWORD     - your RDS password
+#
+# Required GitHub Environments (Settings -> Environments):
+#   production  - add yourself as required reviewer (gates terraform-apply)
+#   destroy     - add yourself as required reviewer (gates terraform-destroy)
+#
+# HOW TO RUN - NO LOCAL SETUP NEEDED:
+#   1. Add all secrets above in GitHub
+#   2. Create production and destroy environments with required reviewers
+#   3. Push to main - bootstrap runs automatically and creates everything
+#   4. Approve terraform-apply when prompted in GitHub UI
+#   5. App URL is printed in smoke-test job logs
 ###############################################################################
 
 name: Banking App CI/CD Pipeline
@@ -200,6 +213,10 @@ jobs:
 
           echo ""
           echo "Bootstrap complete!"
+
+          echo "Waiting 15 seconds for IAM role to propagate globally..."
+          sleep 15
+          echo "IAM propagation wait complete"
 
   # ─────────────────────────────────────────────────────────────────────────
   # JOB: terraform-plan
@@ -465,6 +482,12 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Debug OIDC token claims
+        run: |
+          TOKEN=$(curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN"             "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" |             python3 -c "import sys,json; t=json.load(sys.stdin)['value'];             import base64; parts=t.split('.');             pad=parts[1]+'='*(4-len(parts[1])%4);             print(json.dumps(json.loads(base64.b64decode(pad)), indent=2))" 2>/dev/null || echo "Could not decode token")
+          echo "OIDC Token Claims:"
+          echo "$TOKEN" | grep -E "sub|aud|iss|repo" || echo "Could not parse claims"
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
