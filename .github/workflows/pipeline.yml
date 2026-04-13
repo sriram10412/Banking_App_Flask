@@ -799,7 +799,8 @@ jobs:
           aws ecs wait services-stable \
             --cluster "${{ secrets.ECS_CLUSTER_NAME }}" \
             --services "${{ secrets.ECS_SERVICE_NAME }}" \
-            --region "${{ secrets.AWS_DEFAULT_REGION }}"
+            --region "${{ secrets.AWS_DEFAULT_REGION }}" \
+            --cli-read-timeout 900
 
           echo ""
           echo "================================================"

@@ -14,7 +14,7 @@ variable "db_secret_arn"           { type = string }
 
 variable "desired_count" {
   type    = number
-  default = 2
+  default = 1
 }
 
 variable "cpu" {

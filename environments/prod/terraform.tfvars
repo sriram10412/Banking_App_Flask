@@ -19,7 +19,7 @@ db_password       = "REPLACE_ME_USE_ENV_VAR"
 db_instance_class = "db.t3.micro"
 
 # ECS
-ecs_desired_count = 2
+ecs_desired_count = 1
 ecs_cpu           = 512
 ecs_memory        = 1024
 app_image_tag     = "latest"
