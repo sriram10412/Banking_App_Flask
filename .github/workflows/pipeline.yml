@@ -7,8 +7,6 @@
 #   AWS_ACCOUNT_ID         - 603196661038
 #   AWS_DEFAULT_REGION     - ap-southeast-1
 #   AWS_ROLE_ARN           - arn:aws:iam::603196661038:role/prod-github-ci-role
-#                            NOTE: Bootstrap creates this role automatically.
-#                            On FIRST run use placeholder, update after bootstrap.
 #   ECS_CLUSTER_NAME       - prod-banking-cluster
 #   ECS_SERVICE_NAME       - prod-banking-service
 #   TF_VAR_DB_PASSWORD     - your RDS password
@@ -30,7 +28,7 @@ name: Banking App CI/CD Pipeline
 on:
   push:
     branches: [main]
-  workflow_dispatch:    # allows manual trigger from GitHub UI
+  workflow_dispatch:
 
 env:
   TF_VERSION: "1.7.5"
@@ -70,7 +68,6 @@ jobs:
 
           echo "=== Checking if bootstrap is needed ==="
 
-          # Check OIDC provider
           OIDC=$(aws iam list-open-id-connect-providers \
             --query "OpenIDConnectProviderList[?contains(Arn,'token.actions.githubusercontent.com')].Arn" \
             --output text 2>/dev/null || echo "")
@@ -81,7 +78,6 @@ jobs:
             echo "  OIDC provider exists - OK"
           fi
 
-          # Check IAM role
           ROLE=$(aws iam get-role \
             --role-name ${ROLE_NAME} \
             --query 'Role.RoleName' \
@@ -93,12 +89,10 @@ jobs:
             echo "  IAM role exists - OK"
           fi
 
-          # Check S3 bucket
           aws s3api head-bucket --bucket banking-app-tfstate 2>/dev/null \
             && echo "  S3 bucket exists - OK" \
             || { echo "  S3 bucket missing - bootstrap needed"; NEEDS_BOOTSTRAP=true; }
 
-          # Check DynamoDB table
           TABLE=$(aws dynamodb describe-table \
             --table-name banking-app-tfstate-lock \
             --query 'Table.TableName' \
@@ -123,12 +117,6 @@ jobs:
           echo "=== Running bootstrap ==="
 
           echo "--- Step 1: GitHub OIDC provider ---"
-          GITHUB_THUMBPRINT=$(openssl s_client -servername token.actions.githubusercontent.com \
-            -connect token.actions.githubusercontent.com:443 2>/dev/null | \
-            openssl x509 -fingerprint -noout 2>/dev/null | \
-            sed 's/://g' | awk -F= '{print tolower($2)}' || \
-            echo "6938fd4d98bab03faadb97b34396831e3780aea1")
-
           aws iam create-open-id-connect-provider \
             --url https://token.actions.githubusercontent.com \
             --client-id-list sts.amazonaws.com \
@@ -139,11 +127,9 @@ jobs:
             --bucket banking-app-tfstate \
             --region ${REGION} \
             --create-bucket-configuration LocationConstraint=${REGION} 2>/dev/null || echo "Already exists"
-
           aws s3api put-bucket-versioning \
             --bucket banking-app-tfstate \
             --versioning-configuration Status=Enabled
-
           aws s3api put-bucket-encryption \
             --bucket banking-app-tfstate \
             --server-side-encryption-configuration \
@@ -207,14 +193,70 @@ jobs:
           aws iam update-role \
             --role-name ${ROLE_NAME} \
             --max-session-duration 7200
-          echo "  Max session duration set to 7200 seconds"
 
           echo ""
           echo "Bootstrap complete!"
-
-          echo "Waiting 15 seconds for IAM role to propagate globally..."
+          echo "Waiting 15 seconds for IAM role to propagate..."
           sleep 15
-          echo "IAM propagation wait complete"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # JOB: lint-dockerfile
+  # ─────────────────────────────────────────────────────────────────────────
+  lint-dockerfile:
+    name: Lint Dockerfile
+    runs-on: ubuntu-latest
+    needs: bootstrap
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Lint Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # JOB: lint-terraform
+  # ─────────────────────────────────────────────────────────────────────────
+  lint-terraform:
+    name: Lint Terraform
+    runs-on: ubuntu-latest
+    needs: bootstrap
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+      - name: Terraform Format
+        run: terraform fmt -recursive
+      - name: Terraform Validate
+        run: |
+          terraform init -backend=false
+          terraform validate
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # JOB: lint-app
+  # ─────────────────────────────────────────────────────────────────────────
+  lint-app:
+    name: Lint Python App
+    runs-on: ubuntu-latest
+    needs: bootstrap
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install linters
+        run: pip install flake8 black isort --quiet
+      - name: Run flake8
+        run: flake8 app/ --max-line-length=120
+      - name: Run black
+        run: black app/
+      - name: Run isort
+        run: isort app/
 
   # ─────────────────────────────────────────────────────────────────────────
   # JOB: terraform-plan
@@ -270,59 +312,28 @@ jobs:
             -backend-config="token=${{ env.AWS_SESSION_TOKEN }}" \
             -backend-config="region=${{ secrets.AWS_DEFAULT_REGION }}"
 
-      - name: Import existing AWS resources into state
+      - name: Import global resources into state
         env:
           TF_VAR_db_password: ${{ secrets.TF_VAR_DB_PASSWORD }}
         run: |
-          echo "=== Syncing existing AWS resources into Terraform state ==="
-          echo "Safe to run every time - silently skips if already in state"
-
-          # Common var flags passed to every import command
+          echo "=== Importing global AWS resources (VPC-independent) ==="
           VARS="-var-file=${TF_ROOT}/environments/prod/terraform.tfvars -var=app_image_tag=${{ github.sha }}"
 
-          # RDS resources
-          terraform import ${VARS} module.rds.aws_db_subnet_group.main             prod-banking-db-subnet-group 2>/dev/null || true
-          terraform import ${VARS} module.rds.aws_db_parameter_group.main             prod-banking-pg14 2>/dev/null || true
-          terraform import ${VARS} module.rds.aws_iam_role.rds_monitoring             prod-rds-monitoring-role 2>/dev/null || true
-          aws secretsmanager restore-secret             --secret-id prod/banking-app/db-credentials             --region "${{ secrets.AWS_DEFAULT_REGION }}" 2>/dev/null || true
-          terraform import ${VARS} module.rds.aws_secretsmanager_secret.db_credentials             prod/banking-app/db-credentials 2>/dev/null || true
-
-          # VPC resources
-          terraform import ${VARS} module.vpc.aws_cloudwatch_log_group.flow_logs             /aws/vpc/prod-banking-flow-logs 2>/dev/null || true
-          terraform import ${VARS} module.vpc.aws_iam_role.flow_logs             prod-vpc-flow-logs-role 2>/dev/null || true
-
-          # Monitoring log group
-          terraform import ${VARS} module.monitoring.aws_cloudwatch_log_group.app             /ecs/prod/banking-app 2>/dev/null || true
+          # ECS log group
+          terraform import ${VARS} module.monitoring.aws_cloudwatch_log_group.app \
+            /ecs/prod/banking-app 2>/dev/null || true
 
           # IAM roles
-          terraform import ${VARS} module.iam.aws_iam_role.ecs_task_execution             prod-ecs-task-execution-role 2>/dev/null || true
-          terraform import ${VARS} module.iam.aws_iam_role.ecs_task             prod-ecs-task-role 2>/dev/null || true
+          terraform import ${VARS} module.iam.aws_iam_role.ecs_task_execution \
+            prod-ecs-task-execution-role 2>/dev/null || true
+          terraform import ${VARS} module.iam.aws_iam_role.ecs_task \
+            prod-ecs-task-role 2>/dev/null || true
 
           # ECR repository
-          terraform import ${VARS} module.ecr.aws_ecr_repository.app             prod-banking-app 2>/dev/null || true
+          terraform import ${VARS} module.ecr.aws_ecr_repository.app \
+            prod-banking-app 2>/dev/null || true
 
-          # S3 ALB logs bucket
-          aws s3api head-bucket             --bucket prod-banking-alb-logs-${{ secrets.AWS_ACCOUNT_ID }} 2>/dev/null             && terraform import ${VARS} module.alb.aws_s3_bucket.alb_logs               prod-banking-alb-logs-${{ secrets.AWS_ACCOUNT_ID }} 2>/dev/null || true
-
-          # ALB
-          ALB_ARN=$(aws elbv2 describe-load-balancers             --names prod-banking-alb             --region "${{ secrets.AWS_DEFAULT_REGION }}"             --query 'LoadBalancers[0].LoadBalancerArn'             --output text 2>/dev/null || echo "")
-          if [ ! -z "$ALB_ARN" ] && [ "$ALB_ARN" != "None" ]; then
-            terraform import ${VARS} module.alb.aws_lb.main ${ALB_ARN} 2>/dev/null || true
-          fi
-
-          # Security groups
-          for SG_NAME in prod-alb-sg prod-ecs-sg prod-rds-sg; do
-            SG_ID=$(aws ec2 describe-security-groups               --filters "Name=group-name,Values=${SG_NAME}"               --region "${{ secrets.AWS_DEFAULT_REGION }}"               --query 'SecurityGroups[0].GroupId'               --output text 2>/dev/null || echo "")
-            if [ ! -z "$SG_ID" ] && [ "$SG_ID" != "None" ]; then
-              case ${SG_NAME} in
-                prod-alb-sg) terraform import ${VARS} module.security.aws_security_group.alb ${SG_ID} 2>/dev/null || true ;;
-                prod-ecs-sg) terraform import ${VARS} module.security.aws_security_group.ecs ${SG_ID} 2>/dev/null || true ;;
-                prod-rds-sg) terraform import ${VARS} module.security.aws_security_group.rds ${SG_ID} 2>/dev/null || true ;;
-              esac
-            fi
-          done
-
-          echo "=== State sync complete ==="
+          echo "=== Import complete ==="
 
       - name: Terraform Plan
         env:
@@ -359,7 +370,7 @@ jobs:
     name: Terraform Apply
     runs-on: ubuntu-latest
     needs: terraform-plan
-    environment: production    # ← requires manual approval in GitHub settings
+    environment: production
     permissions:
       id-token: write
       contents: read
@@ -410,7 +421,11 @@ jobs:
         run: |
           echo "=== Running fresh terraform plan ==="
           set +e
-          terraform plan  -var-file="${TF_ROOT}/environments/prod/terraform.tfvars"             -var="app_image_tag=${{ github.sha }}"             -out=tfplan             -detailed-exitcode
+          terraform plan \
+            -var-file="${TF_ROOT}/environments/prod/terraform.tfvars" \
+            -var="app_image_tag=${{ github.sha }}" \
+            -out=tfplan \
+            -detailed-exitcode
           PLAN_EXIT=$?
           set -e
           if [ $PLAN_EXIT -eq 1 ]; then
@@ -423,6 +438,7 @@ jobs:
           terraform apply -auto-approve tfplan
           EXIT_CODE=$?
           set -e
+
           if [ $EXIT_CODE -eq 0 ]; then
             ALB_DNS=$(terraform output -raw alb_dns_name)
             echo "http://${ALB_DNS}" > alb_url.txt
@@ -432,7 +448,6 @@ jobs:
             echo " ALB DNS : http://${ALB_DNS}"
             echo " Health  : http://${ALB_DNS}/health"
             echo "================================================"
-            echo "ALB_URL=http://${ALB_DNS}" >> $GITHUB_ENV
           else
             echo "Terraform apply failed with exit code ${EXIT_CODE}"
             exit 1
@@ -444,77 +459,6 @@ jobs:
           name: alb-url
           path: alb_url.txt
           retention-days: 1
-
-  # ─────────────────────────────────────────────────────────────────────────
-  # JOB: lint-dockerfile
-  # ─────────────────────────────────────────────────────────────────────────
-  lint-dockerfile:
-    name: Lint Dockerfile
-    runs-on: ubuntu-latest
-    needs:
-      - bootstrap
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Lint Dockerfile
-        uses: hadolint/hadolint-action@v3.1.0
-        with:
-          dockerfile: Dockerfile
-
-  # ─────────────────────────────────────────────────────────────────────────
-  # JOB: lint-terraform
-  # ─────────────────────────────────────────────────────────────────────────
-  lint-terraform:
-    name: Lint Terraform
-    runs-on: ubuntu-latest
-    needs:
-      - bootstrap
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TF_VERSION }}
-
-      - name: Terraform Format
-        run: terraform fmt -recursive
-
-      - name: Terraform Validate
-        run: |
-          terraform init -backend=false
-          terraform validate
-
-  # ─────────────────────────────────────────────────────────────────────────
-  # JOB: lint-app
-  # ─────────────────────────────────────────────────────────────────────────
-  lint-app:
-    name: Lint Python App
-    runs-on: ubuntu-latest
-    needs:
-      - bootstrap
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install linters
-        run: pip install flake8 black isort --quiet
-
-      - name: Run flake8
-        run: flake8 app/ --max-line-length=120
-
-      - name: Run black
-        run: black app/
-
-      - name: Run isort
-        run: isort app/
 
   # ─────────────────────────────────────────────────────────────────────────
   # JOB: build-image
@@ -571,8 +515,7 @@ jobs:
   test-unit:
     name: Unit Tests
     runs-on: ubuntu-latest
-    needs:
-      - terraform-apply
+    needs: terraform-apply
     services:
       postgres:
         image: postgres:15-alpine
@@ -593,15 +536,12 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
       - name: Install dependencies
         run: pip install -r requirements.txt --quiet
-
       - name: Run unit tests
         run: |
           pytest app/tests/unit/ -v \
@@ -609,7 +549,6 @@ jobs:
             --cov-report=xml \
             --cov-report=term-missing \
             --junitxml=junit-unit.xml || true
-
       - name: Upload test results
         uses: actions/upload-artifact@v4
         if: always()
@@ -626,8 +565,7 @@ jobs:
   test-integration:
     name: Integration Tests
     runs-on: ubuntu-latest
-    needs:
-      - terraform-apply
+    needs: terraform-apply
     services:
       postgres:
         image: postgres:15-alpine
@@ -648,20 +586,16 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
       - name: Install dependencies
         run: pip install -r requirements.txt --quiet
-
       - name: Run integration tests
         run: |
           pytest app/tests/integration/ -v \
             --junitxml=junit-integration.xml || true
-
       - name: Upload test results
         uses: actions/upload-artifact@v4
         if: always()
@@ -684,14 +618,12 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           role-session-name: github-ci-${{ github.run_id }}
           aws-region: ${{ secrets.AWS_DEFAULT_REGION }}
-
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master
         with:
@@ -704,7 +636,6 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ env.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ env.AWS_SECRET_ACCESS_KEY }}
           AWS_SESSION_TOKEN: ${{ env.AWS_SESSION_TOKEN }}
-
       - name: Upload Trivy scan results
         uses: github/codeql-action/upload-sarif@v3
         if: always()
@@ -717,18 +648,15 @@ jobs:
   security-sast:
     name: SAST - Bandit
     runs-on: ubuntu-latest
-    needs:
-      - terraform-apply
+    needs: terraform-apply
     continue-on-error: true
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
       - name: Run Bandit
         run: |
           pip install bandit --quiet
@@ -736,7 +664,6 @@ jobs:
           bandit -r app/ -f json -o bandit-report.json -ll
           set -e
           echo "SAST scan complete"
-
       - name: Upload Bandit report
         uses: actions/upload-artifact@v4
         if: always()
@@ -751,14 +678,12 @@ jobs:
   security-secrets:
     name: Secret Scanning - Gitleaks
     runs-on: ubuntu-latest
-    needs:
-      - terraform-apply
+    needs: terraform-apply
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
       - name: Run Gitleaks
         uses: gitleaks/gitleaks-action@v2
         env:
@@ -770,13 +695,11 @@ jobs:
   security-terraform:
     name: Terraform Security - tfsec
     runs-on: ubuntu-latest
-    needs:
-      - terraform-apply
+    needs: terraform-apply
     continue-on-error: true
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
       - name: Run tfsec
         uses: aquasecurity/tfsec-action@v1.0.0
         with:
@@ -818,7 +741,6 @@ jobs:
 
       - name: Deploy to ECS
         run: |
-          # Read ALB URL from artifact or fetch from AWS
           if [ -f alb_url.txt ]; then
             APP_URL=$(cat alb_url.txt)
             echo "ALB URL from artifact: ${APP_URL}"
@@ -834,7 +756,6 @@ jobs:
 
           IMAGE_TAG="${{ github.sha }}"
 
-          # Verify image exists in ECR
           aws ecr describe-images \
             --repository-name prod-banking-app \
             --image-ids imageTag=${IMAGE_TAG} \
@@ -842,14 +763,12 @@ jobs:
             && echo "Image tag ${IMAGE_TAG} found in ECR" \
             || { echo "Falling back to latest..."; IMAGE_TAG="latest"; }
 
-          # Get current task definition
           TASK_DEF=$(aws ecs describe-task-definition \
             --task-definition prod-banking-app \
             --region "${{ secrets.AWS_DEFAULT_REGION }}" \
             --query 'taskDefinition' \
             --output json)
 
-          # Update image in task definition
           NEW_TASK_DEF=$(echo ${TASK_DEF} | python3 -c "
           import json, sys
           td = json.load(sys.stdin)
@@ -862,7 +781,6 @@ jobs:
           print(json.dumps(td))
           ")
 
-          # Register new task definition
           NEW_TASK_ARN=$(aws ecs register-task-definition \
             --region "${{ secrets.AWS_DEFAULT_REGION }}" \
             --cli-input-json "${NEW_TASK_DEF}" \
@@ -870,7 +788,6 @@ jobs:
             --output text)
           echo "New task definition: ${NEW_TASK_ARN}"
 
-          # Update ECS service
           aws ecs update-service \
             --cluster "${{ secrets.ECS_CLUSTER_NAME }}" \
             --service "${{ secrets.ECS_SERVICE_NAME }}" \
@@ -925,16 +842,15 @@ jobs:
           echo ""
           echo "================================================"
           echo " Smoke test passed!"
-          echo " App is live and accessible at:"
-          echo " ${APP_URL}"
+          echo " App is live at: ${APP_URL}"
           echo ""
-          echo " Available endpoints:"
-          echo " GET  ${APP_URL}/health"
-          echo " POST ${APP_URL}/accounts"
-          echo " GET  ${APP_URL}/accounts/{id}/balance"
-          echo " POST ${APP_URL}/accounts/{id}/deposit"
-          echo " POST ${APP_URL}/accounts/{id}/withdraw"
-          echo " GET  ${APP_URL}/docs"
+          echo " Endpoints:"
+          echo "   GET  ${APP_URL}/health"
+          echo "   POST ${APP_URL}/accounts"
+          echo "   GET  ${APP_URL}/accounts/{id}/balance"
+          echo "   POST ${APP_URL}/accounts/{id}/deposit"
+          echo "   POST ${APP_URL}/accounts/{id}/withdraw"
+          echo "   GET  ${APP_URL}/docs"
           echo "================================================"
 
   # ─────────────────────────────────────────────────────────────────────────
@@ -944,7 +860,7 @@ jobs:
     name: Destroy All Infrastructure
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch'
-    environment: destroy    # ← requires manual approval in GitHub settings
+    environment: destroy
     permissions:
       id-token: write
       contents: read
@@ -984,7 +900,6 @@ jobs:
         run: |
           echo "=== Pre-destroy cleanup ==="
 
-          # Disable ALB deletion protection
           ALB_ARN=$(aws elbv2 describe-load-balancers \
             --names prod-banking-alb \
             --region "${{ secrets.AWS_DEFAULT_REGION }}" \
@@ -998,19 +913,16 @@ jobs:
             echo "ALB deletion protection disabled"
           fi
 
-          # Disable RDS deletion protection
           aws rds modify-db-instance \
             --db-instance-identifier prod-banking-db \
             --no-deletion-protection \
             --region "${{ secrets.AWS_DEFAULT_REGION }}" 2>/dev/null || echo "RDS not found"
 
-          # Delete existing RDS snapshot
           aws rds delete-db-snapshot \
             --db-snapshot-identifier prod-banking-db-final \
             --region "${{ secrets.AWS_DEFAULT_REGION }}" 2>/dev/null || echo "No snapshot found"
           sleep 30
 
-          # Empty ECR repository
           echo "Emptying ECR repository..."
           IMAGE_IDS=$(aws ecr list-images \
             --repository-name prod-banking-app \
@@ -1024,7 +936,6 @@ jobs:
               --region "${{ secrets.AWS_DEFAULT_REGION }}" 2>/dev/null || true
           fi
 
-          # Delete NAT Gateways
           for NAT in $(aws ec2 describe-nat-gateways \
             --region "${{ secrets.AWS_DEFAULT_REGION }}" \
             --filter "Name=state,Values=available" \
@@ -1037,7 +948,6 @@ jobs:
           echo "Waiting for NAT Gateways to delete (60s)..."
           sleep 60
 
-          # Release EIPs
           for ALLOC in $(aws ec2 describe-addresses \
             --region "${{ secrets.AWS_DEFAULT_REGION }}" \
             --query 'Addresses[?AssociationId==null].AllocationId' \
@@ -1047,7 +957,6 @@ jobs:
               --region "${{ secrets.AWS_DEFAULT_REGION }}" 2>/dev/null || true
           done
 
-          # Empty S3 ALB logs bucket
           BUCKET="prod-banking-alb-logs-${{ secrets.AWS_ACCOUNT_ID }}"
           aws s3 rm s3://${BUCKET} --recursive \
             --region "${{ secrets.AWS_DEFAULT_REGION }}" 2>/dev/null || true
@@ -1071,7 +980,6 @@ jobs:
         run: |
           echo "=== Destroying bootstrap resources ==="
 
-          # Delete GitHub CI IAM role
           aws iam detach-role-policy \
             --role-name prod-github-ci-role \
             --policy-arn arn:aws:iam::aws:policy/AdministratorAccess 2>/dev/null || true
@@ -1079,21 +987,18 @@ jobs:
             --role-name prod-github-ci-role 2>/dev/null || true
           echo "GitHub CI role deleted"
 
-          # Delete OIDC provider
           aws iam delete-open-id-connect-provider \
             --open-id-connect-provider-arn \
             arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:oidc-provider/token.actions.githubusercontent.com \
             2>/dev/null || true
           echo "OIDC provider deleted"
 
-          # Empty and delete Terraform state S3 bucket
           aws s3 rm s3://banking-app-tfstate --recursive 2>/dev/null || true
           aws s3api delete-bucket \
             --bucket banking-app-tfstate \
             --region "${{ secrets.AWS_DEFAULT_REGION }}" 2>/dev/null || true
           echo "State bucket deleted"
 
-          # Delete DynamoDB lock table
           aws dynamodb delete-table \
             --table-name banking-app-tfstate-lock \
             --region "${{ secrets.AWS_DEFAULT_REGION }}" 2>/dev/null || true
