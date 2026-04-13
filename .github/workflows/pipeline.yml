@@ -796,11 +796,24 @@ jobs:
             --region "${{ secrets.AWS_DEFAULT_REGION }}"
 
           echo "Waiting for service to stabilize..."
-          aws ecs wait services-stable \
-            --cluster "${{ secrets.ECS_CLUSTER_NAME }}" \
-            --services "${{ secrets.ECS_SERVICE_NAME }}" \
-            --region "${{ secrets.AWS_DEFAULT_REGION }}" \
-            --cli-read-timeout 900
+          ATTEMPTS=0
+          MAX_ATTEMPTS=40
+          while [ $ATTEMPTS -lt $MAX_ATTEMPTS ]; do
+            RUNNING=$(aws ecs describe-services               --cluster "${{ secrets.ECS_CLUSTER_NAME }}"               --services "${{ secrets.ECS_SERVICE_NAME }}"               --region "${{ secrets.AWS_DEFAULT_REGION }}"               --query 'services[0].runningCount'               --output text)
+            DESIRED=$(aws ecs describe-services               --cluster "${{ secrets.ECS_CLUSTER_NAME }}"               --services "${{ secrets.ECS_SERVICE_NAME }}"               --region "${{ secrets.AWS_DEFAULT_REGION }}"               --query 'services[0].desiredCount'               --output text)
+            echo "  Running: ${RUNNING} / Desired: ${DESIRED} (attempt $((ATTEMPTS+1))/${MAX_ATTEMPTS})"
+            if [ "$RUNNING" = "$DESIRED" ] && [ "$DESIRED" != "0" ]; then
+              echo "Service is stable!"
+              break
+            fi
+            ATTEMPTS=$((ATTEMPTS+1))
+            if [ $ATTEMPTS -eq $MAX_ATTEMPTS ]; then
+              echo "ERROR: Service did not stabilize after $MAX_ATTEMPTS attempts"
+              aws ecs describe-services                 --cluster "${{ secrets.ECS_CLUSTER_NAME }}"                 --services "${{ secrets.ECS_SERVICE_NAME }}"                 --region "${{ secrets.AWS_DEFAULT_REGION }}"                 --query 'services[0].events[0:5]'
+              exit 1
+            fi
+            sleep 15
+          done
 
           echo ""
           echo "================================================"
@@ -959,8 +972,17 @@ jobs:
           done
 
           BUCKET="prod-banking-alb-logs-${{ secrets.AWS_ACCOUNT_ID }}"
-          aws s3 rm s3://${BUCKET} --recursive \
-            --region "${{ secrets.AWS_DEFAULT_REGION }}" 2>/dev/null || true
+          echo "Emptying S3 bucket ${BUCKET}..."
+          aws s3 rm s3://${BUCKET} --recursive             --region "${{ secrets.AWS_DEFAULT_REGION }}" 2>/dev/null || true
+          VERSIONS=$(aws s3api list-object-versions             --bucket ${BUCKET}             --query '{Objects: Versions[].{Key:Key,VersionId:VersionId}}'             --output json 2>/dev/null || echo '{"Objects":[]}')
+          if [ "$VERSIONS" != '{"Objects":[]}' ] && [ "$VERSIONS" != 'null' ]; then
+            aws s3api delete-objects               --bucket ${BUCKET}               --delete "${VERSIONS}"               --region "${{ secrets.AWS_DEFAULT_REGION }}" 2>/dev/null || true
+          fi
+          MARKERS=$(aws s3api list-object-versions             --bucket ${BUCKET}             --query '{Objects: DeleteMarkers[].{Key:Key,VersionId:VersionId}}'             --output json 2>/dev/null || echo '{"Objects":[]}')
+          if [ "$MARKERS" != '{"Objects":[]}' ] && [ "$MARKERS" != 'null' ]; then
+            aws s3api delete-objects               --bucket ${BUCKET}               --delete "${MARKERS}"               --region "${{ secrets.AWS_DEFAULT_REGION }}" 2>/dev/null || true
+          fi
+          echo "S3 bucket emptied"
 
       - name: Terraform Destroy
         env:
