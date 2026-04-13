@@ -270,15 +270,6 @@ jobs:
             -backend-config="token=${{ env.AWS_SESSION_TOKEN }}" \
             -backend-config="region=${{ secrets.AWS_DEFAULT_REGION }}"
 
-      - name: Import existing resources
-        run: |
-          aws secretsmanager restore-secret \
-            --secret-id prod/banking-app/db-credentials \
-            --region "${{ secrets.AWS_DEFAULT_REGION }}" 2>/dev/null || true
-          terraform import \
-            module.rds.aws_secretsmanager_secret.db_credentials \
-            prod/banking-app/db-credentials 2>/dev/null || true
-
       - name: Terraform Plan
         env:
           TF_VAR_db_password: ${{ secrets.TF_VAR_DB_PASSWORD }}
