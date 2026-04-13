@@ -270,6 +270,55 @@ jobs:
             -backend-config="token=${{ env.AWS_SESSION_TOKEN }}" \
             -backend-config="region=${{ secrets.AWS_DEFAULT_REGION }}"
 
+      - name: Import existing AWS resources into state
+        run: |
+          echo "=== Syncing existing AWS resources into Terraform state ==="
+          echo "Safe to run every time - silently skips if already in state"
+
+          # RDS resources
+          terraform import module.rds.aws_db_subnet_group.main             prod-banking-db-subnet-group 2>/dev/null || true
+          terraform import module.rds.aws_db_parameter_group.main             prod-banking-pg14 2>/dev/null || true
+          terraform import module.rds.aws_iam_role.rds_monitoring             prod-rds-monitoring-role 2>/dev/null || true
+          aws secretsmanager restore-secret             --secret-id prod/banking-app/db-credentials             --region "${{ secrets.AWS_DEFAULT_REGION }}" 2>/dev/null || true
+          terraform import module.rds.aws_secretsmanager_secret.db_credentials             prod/banking-app/db-credentials 2>/dev/null || true
+
+          # VPC resources
+          terraform import module.vpc.aws_cloudwatch_log_group.flow_logs             /aws/vpc/prod-banking-flow-logs 2>/dev/null || true
+          terraform import module.vpc.aws_iam_role.flow_logs             prod-vpc-flow-logs-role 2>/dev/null || true
+
+          # Monitoring log group
+          terraform import module.monitoring.aws_cloudwatch_log_group.app             /ecs/prod/banking-app 2>/dev/null || true
+
+          # IAM roles
+          terraform import module.iam.aws_iam_role.ecs_task_execution             prod-ecs-task-execution-role 2>/dev/null || true
+          terraform import module.iam.aws_iam_role.ecs_task             prod-ecs-task-role 2>/dev/null || true
+
+          # ECR repository
+          terraform import module.ecr.aws_ecr_repository.app             prod-banking-app 2>/dev/null || true
+
+          # S3 ALB logs bucket
+          aws s3api head-bucket             --bucket prod-banking-alb-logs-${{ secrets.AWS_ACCOUNT_ID }} 2>/dev/null             && terraform import module.alb.aws_s3_bucket.alb_logs               prod-banking-alb-logs-${{ secrets.AWS_ACCOUNT_ID }} 2>/dev/null || true
+
+          # ALB
+          ALB_ARN=$(aws elbv2 describe-load-balancers             --names prod-banking-alb             --region "${{ secrets.AWS_DEFAULT_REGION }}"             --query 'LoadBalancers[0].LoadBalancerArn'             --output text 2>/dev/null || echo "")
+          if [ ! -z "$ALB_ARN" ] && [ "$ALB_ARN" != "None" ]; then
+            terraform import module.alb.aws_lb.main ${ALB_ARN} 2>/dev/null || true
+          fi
+
+          # Security groups
+          for SG_NAME in prod-alb-sg prod-ecs-sg prod-rds-sg; do
+            SG_ID=$(aws ec2 describe-security-groups               --filters "Name=group-name,Values=${SG_NAME}"               --region "${{ secrets.AWS_DEFAULT_REGION }}"               --query 'SecurityGroups[0].GroupId'               --output text 2>/dev/null || echo "")
+            if [ ! -z "$SG_ID" ] && [ "$SG_ID" != "None" ]; then
+              case ${SG_NAME} in
+                prod-alb-sg) terraform import module.security.aws_security_group.alb ${SG_ID} 2>/dev/null || true ;;
+                prod-ecs-sg) terraform import module.security.aws_security_group.ecs ${SG_ID} 2>/dev/null || true ;;
+                prod-rds-sg) terraform import module.security.aws_security_group.rds ${SG_ID} 2>/dev/null || true ;;
+              esac
+            fi
+          done
+
+          echo "=== State sync complete ==="
+
       - name: Terraform Plan
         env:
           TF_VAR_db_password: ${{ secrets.TF_VAR_DB_PASSWORD }}
