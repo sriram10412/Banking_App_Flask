@@ -222,7 +222,11 @@ jobs:
   terraform-plan:
     name: Terraform Plan
     runs-on: ubuntu-latest
-    needs: bootstrap
+    needs:
+      - bootstrap
+      - lint-dockerfile
+      - lint-terraform
+      - lint-app
     permissions:
       id-token: write
       contents: read
@@ -405,7 +409,8 @@ jobs:
   lint-dockerfile:
     name: Lint Dockerfile
     runs-on: ubuntu-latest
-    needs: bootstrap
+    needs:
+      - bootstrap
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -421,7 +426,8 @@ jobs:
   lint-terraform:
     name: Lint Terraform
     runs-on: ubuntu-latest
-    needs: bootstrap
+    needs:
+      - bootstrap
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -445,7 +451,8 @@ jobs:
   lint-app:
     name: Lint Python App
     runs-on: ubuntu-latest
-    needs: bootstrap
+    needs:
+      - bootstrap
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -473,7 +480,9 @@ jobs:
   build-image:
     name: Build and Push Docker Image
     runs-on: ubuntu-latest
-    needs: bootstrap
+    needs:
+      - bootstrap
+      - terraform-apply
     permissions:
       id-token: write
       contents: read
@@ -520,7 +529,8 @@ jobs:
   test-unit:
     name: Unit Tests
     runs-on: ubuntu-latest
-    needs: bootstrap
+    needs:
+      - terraform-apply
     services:
       postgres:
         image: postgres:15-alpine
@@ -574,7 +584,8 @@ jobs:
   test-integration:
     name: Integration Tests
     runs-on: ubuntu-latest
-    needs: bootstrap
+    needs:
+      - terraform-apply
     services:
       postgres:
         image: postgres:15-alpine
@@ -664,7 +675,8 @@ jobs:
   security-sast:
     name: SAST - Bandit
     runs-on: ubuntu-latest
-    needs: bootstrap
+    needs:
+      - terraform-apply
     continue-on-error: true
     steps:
       - name: Checkout code
@@ -697,7 +709,8 @@ jobs:
   security-secrets:
     name: Secret Scanning - Gitleaks
     runs-on: ubuntu-latest
-    needs: bootstrap
+    needs:
+      - terraform-apply
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -715,7 +728,8 @@ jobs:
   security-terraform:
     name: Terraform Security - tfsec
     runs-on: ubuntu-latest
-    needs: bootstrap
+    needs:
+      - terraform-apply
     continue-on-error: true
     steps:
       - name: Checkout code
