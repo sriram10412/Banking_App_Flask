@@ -7,7 +7,7 @@ set -e
 ACCOUNT_ID="603196661038"
 REGION="ap-southeast-1"
 ROLE_NAME="prod-github-ci-role"
-GITHUB_REPO="your-github-username/banking_app_flask"   # ← replace with your repo
+GITHUB_REPO="sriram10412/Banking_App_Flask"
 
 echo "======================================"
 echo " Banking App Bootstrap (GitHub)"
