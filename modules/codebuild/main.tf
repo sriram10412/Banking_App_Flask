@@ -64,11 +64,38 @@ resource "aws_codebuild_project" "banking" {
     privileged_mode = true
 
     environment_variable {
+      name  = "AWS_DEFAULT_REGION"
+      value = var.aws_region
+    }
+    environment_variable {
+      name  = "AWS_ACCOUNT_ID"
+      value = var.aws_account_id
+    }
+    environment_variable {
+      name  = "ECR_REPOSITORY_NAME"
+      value = "${var.environment}-banking-app"
+    }
+    environment_variable {
+      name  = "ECS_CLUSTER_NAME"
+      value = "${var.environment}-banking-cluster"
+    }
+    environment_variable {
+      name  = "ECS_SERVICE_NAME"
+      value = "${var.environment}-banking-service"
+    }
+    environment_variable {
+      name  = "ALB_NAME"
+      value = "${var.environment}-banking-alb"
+    }
+    environment_variable {
+      name  = "TF_STATE_BUCKET"
+      value = var.tf_state_bucket
+    }
+    environment_variable {
       name  = "DB_PASSWORD"
       value = var.db_password
       type  = "PLAINTEXT"
     }
-
     environment_variable {
       name  = "GH_PAT"
       value = var.github_token

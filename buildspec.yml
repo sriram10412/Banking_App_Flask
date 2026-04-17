@@ -3,13 +3,9 @@ version: 0.2
 env:
   variables:
     TF_VERSION: "1.7.5"
-    AWS_DEFAULT_REGION: "us-east-1"
-    AWS_ACCOUNT_ID: "842548752774"
-    ECR_REPOSITORY_NAME: "prod-banking-app"
-    ECS_CLUSTER_NAME: "prod-banking-cluster"
-    ECS_SERVICE_NAME: "prod-banking-service"
-    ECS_TASK_DEFINITION: "prod-banking-app"
-    ALB_NAME: "prod-banking-alb"
+    # All other values (AWS_ACCOUNT_ID, AWS_DEFAULT_REGION, ECR/ECS/ALB names,
+    # DB_PASSWORD, GH_PAT) are injected by the CodeBuild project env vars
+    # defined in modules/codebuild/main.tf via Terraform.
 
 phases:
   install:

@@ -128,8 +128,9 @@ module "codebuild" {
   aws_account_id         = var.aws_account_id
   github_repo            = var.github_repo
   github_branch          = var.github_branch
-  github_token = var.github_token
-  db_password  = var.db_password
+  github_token    = var.github_token
+  db_password     = var.db_password
+  tf_state_bucket = var.tf_state_bucket
 }
 
 # ── Monitoring & Logging ─────────────────────────────────────────────────────
