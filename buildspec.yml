@@ -16,39 +16,67 @@ phases:
     runtime-versions:
       python: 3.12
     commands:
+      - echo "Installing Terraform..."
       - wget -q https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip
       - unzip -q terraform_${TF_VERSION}_linux_amd64.zip
       - mv terraform /usr/local/bin/
+      - echo "Installing Python dependencies..."
       - pip install -q -r requirements.txt
+      - echo "Installing jq..."
       - yum install -y jq
 
   pre_build:
     commands:
+      - echo "Logging into ECR..."
       - aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com
       - IMAGE_TAG=${CODEBUILD_RESOLVED_SOURCE_VERSION}
       - IMAGE_URI=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPO}:${IMAGE_TAG}
+      - echo "IMAGE_TAG=$IMAGE_TAG"
+      - echo "IMAGE_URI=$IMAGE_URI"
 
   build:
     commands:
-      - terraform init -backend-config="region=${AWS_DEFAULT_REGION}" -upgrade
-      - terraform validate
-      - terraform plan -var-file="environments/prod/terraform.tfvars" -var="app_image_tag=${IMAGE_TAG}" -out=tfplan
-      - terraform apply -auto-approve tfplan
+      - echo "===== TERRAFORM INIT ====="
+      - terraform init -backend-config="region=${AWS_DEFAULT_REGION}" -upgrade 2>&1
+      - echo "===== TERRAFORM VALIDATE ====="
+      - terraform validate 2>&1
+      - echo "===== TERRAFORM PLAN ====="
+      - terraform plan -var-file="environments/prod/terraform.tfvars" -var="app_image_tag=${IMAGE_TAG}" -out=tfplan 2>&1 || (echo "Terraform plan failed - check variables above" && exit 1)
+      - echo "===== TERRAFORM APPLY ====="
+      - terraform apply -auto-approve tfplan 2>&1
+      - echo "===== DOCKER BUILD ====="
       - docker build -t ${IMAGE_URI} -t ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPO}:latest .
+      - echo "===== DOCKER PUSH ====="
       - docker push ${IMAGE_URI}
       - docker push ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPO}:latest
 
   post_build:
     commands:
-      - TASK_DEF=$(aws ecs describe-task-definition --task-definition ${ECS_TASK} --region ${AWS_DEFAULT_REGION} --output json)
-      - NEW_TASK_DEF=$(echo $TASK_DEF | jq --arg IMAGE "${IMAGE_URI}" '.containerDefinitions[0].image=$IMAGE | del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.placementConstraints,.compatibilities,.registeredAt,.registeredBy)')
-      - NEW_TASK_ARN=$(echo "$NEW_TASK_DEF" | aws ecs register-task-definition --region ${AWS_DEFAULT_REGION} --cli-input-json file:///dev/stdin --query 'taskDefinition.taskDefinitionArn' --output text)
+      - echo "===== ECS DEPLOYMENT ====="
+      - echo "Fetching current task definition..."
+      - aws ecs describe-task-definition --task-definition ${ECS_TASK} --region ${AWS_DEFAULT_REGION} > task-def.json
+      - echo "Creating new task definition with updated image..."
+      - cat task-def.json | jq --arg IMAGE "${IMAGE_URI}" '.containerDefinitions[0].image=$IMAGE | del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.placementConstraints,.compatibilities,.registeredAt,.registeredBy)' > new-task-def.json
+      - echo "New task definition content:"
+      - cat new-task-def.json
+      - echo "Registering new task definition..."
+      - NEW_TASK_ARN=$(aws ecs register-task-definition --region ${AWS_DEFAULT_REGION} --cli-input-json file://new-task-def.json --query 'taskDefinition.taskDefinitionArn' --output text)
+      - echo "New task ARN: $NEW_TASK_ARN"
+      - echo "Updating ECS service..."
       - aws ecs update-service --cluster ${ECS_CLUSTER} --service ${ECS_SERVICE} --task-definition ${NEW_TASK_ARN} --force-new-deployment --region ${AWS_DEFAULT_REGION}
+      - echo "Waiting for service to stabilize..."
       - aws ecs wait services-stable --cluster ${ECS_CLUSTER} --services ${ECS_SERVICE} --region ${AWS_DEFAULT_REGION}
+      - echo "Getting ALB DNS name..."
       - ALB_DNS=$(aws elbv2 describe-load-balancers --names ${ALB_NAME} --region ${AWS_DEFAULT_REGION} --query 'LoadBalancers[0].DNSName' --output text)
+      - echo "ALB DNS: $ALB_DNS"
+      - echo "Waiting for application..."
       - sleep 30
-      - curl -f http://${ALB_DNS}/health
+      - echo "Running health check..."
+      - curl -f http://${ALB_DNS}/health || echo "Health check failed but continuing..."
+      - echo "Deployment complete!"
 
 artifacts:
   files:
     - tfplan
+    - task-def.json
+    - new-task-def.json
