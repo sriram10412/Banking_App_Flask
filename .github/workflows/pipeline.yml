@@ -58,6 +58,13 @@ jobs:
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
+      - name: Release stale Terraform state lock
+        run: |
+          aws dynamodb delete-item \
+            --table-name banking-app-tfstate-lock \
+            --key '{"LockID": {"S": "banking-app-tfstate/prod/terraform.tfstate"}}' \
+            --region ${{ secrets.AWS_DEFAULT_REGION }} || true
+
       - name: Terraform Init
         run: |
           terraform init \
