@@ -21,20 +21,23 @@ phases:
       - IMAGE_URI=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/prod-banking-app:${IMAGE_TAG}
   build:
     commands:
+      - echo "Running terraform init..."
       - terraform init -backend-config="region=${AWS_DEFAULT_REGION}" -upgrade
+      - echo "Running terraform validate..."
       - terraform validate
-      - terraform plan -var-file="environments/prod/terraform.tfvars" -var="app_image_tag=${IMAGE_TAG}" -out=tfplan
-      - terraform apply -auto-approve tfplan
+      - echo "Running terraform plan..."
+      - terraform plan -var-file="environments/prod/terraform.tfvars" -var="app_image_tag=${IMAGE_TAG}" -out=tfplan || (echo "TERRAFORM PLAN FAILED - See errors above" && exit 1)
+      - echo "Running terraform apply..."
+      - terraform apply -auto-approve tfplan || (echo "TERRAFORM APPLY FAILED - See errors above" && exit 1)
+      - echo "Building Docker image..."
       - docker build -t ${IMAGE_URI} -t ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/prod-banking-app:latest .
+      - echo "Pushing Docker image..."
       - docker push ${IMAGE_URI}
       - docker push ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/prod-banking-app:latest
   post_build:
     commands:
-      - aws ecs describe-task-definition --task-definition prod-banking-app --region ${AWS_DEFAULT_REGION} > task-def.json
-      - cat task-def.json | jq '.taskDefinition | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .placementConstraints, .compatibilities, .registeredAt, .registeredBy)' > new-task-def.json
-      - NEW_TASK_ARN=$(aws ecs register-task-definition --region ${AWS_DEFAULT_REGION} --cli-input-json file://new-task-def.json --query 'taskDefinition.taskDefinitionArn' --output text)
-      - aws ecs update-service --cluster prod-banking-cluster --service prod-banking-service --task-definition ${NEW_TASK_ARN} --force-new-deployment --region ${AWS_DEFAULT_REGION}
-      - aws ecs wait services-stable --cluster prod-banking-cluster --services prod-banking-service --region ${AWS_DEFAULT_REGION}
+      - echo "Skipping ECS deployment until Terraform succeeds"
+      - echo "First, fix the Terraform errors shown above"
 artifacts:
   files:
     - tfplan
