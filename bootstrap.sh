@@ -6,15 +6,16 @@
 #   1. S3 bucket  – Terraform remote state
 #   2. DynamoDB   – Terraform state lock
 #   3. Secrets Manager secret – DB master password  (from $DB_PASSWORD env var)
-#   4. Secrets Manager secret – GitHub token        (from $GITHUB_TOKEN env var)
+#   4. Secrets Manager secret – GitHub token        (from $GH_PAT env var)
 #
+# All values come from env vars — hardcoded defaults are fallbacks only.
 # Safe to run on every build — all operations are idempotent.
 ###############################################################################
 set -euo pipefail
 
-ACCOUNT_ID="842548752774"
-REGION="us-east-1"
-BUCKET_NAME="bankingpromo1234"
+ACCOUNT_ID="${AWS_ACCOUNT_ID:-842548752774}"
+REGION="${AWS_DEFAULT_REGION:-us-east-1}"
+BUCKET_NAME="${TF_STATE_BUCKET:-bankingpromo1234}"
 DB_SECRET_NAME="prod/banking-app/db-master-password"
 GH_SECRET_NAME="prod/banking-app/github-token"
 
@@ -93,22 +94,22 @@ aws secretsmanager create-secret \
 echo ""
 echo "[4/4] Secrets Manager secret for GitHub token..."
 
-if [ -z "${GITHUB_TOKEN:-}" ]; then
-  echo "  ERROR: GITHUB_TOKEN env var is not set."
+if [ -z "${GH_PAT:-}" ]; then
+  echo "  ERROR: GH_PAT env var is not set."
   exit 1
 fi
 
 aws secretsmanager create-secret \
   --name "${GH_SECRET_NAME}" \
   --description "Banking App GitHub PAT" \
-  --secret-string "${GITHUB_TOKEN}" \
+  --secret-string "${GH_PAT}" \
   --region "${REGION}" \
   --query 'ARN' --output text 2>/dev/null \
   && echo "  Secret created." \
   || {
     aws secretsmanager put-secret-value \
       --secret-id "${GH_SECRET_NAME}" \
-      --secret-string "${GITHUB_TOKEN}" \
+      --secret-string "${GH_PAT}" \
       --region "${REGION}" > /dev/null
     echo "  Secret already exists – value updated."
   }

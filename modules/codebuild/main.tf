@@ -70,7 +70,7 @@ resource "aws_codebuild_project" "banking" {
     }
 
     environment_variable {
-      name  = "GITHUB_TOKEN"
+      name  = "GH_PAT"
       value = var.github_token
       type  = "PLAINTEXT"
     }
