@@ -34,12 +34,8 @@ variable "github_token" {
   sensitive   = true
 }
 
-variable "db_password_secret_arn" {
-  description = "Secrets Manager secret ARN whose value is the DB master password (injected as TF_VAR_db_password)"
+variable "db_password" {
+  description = "Database master password – stored in Secrets Manager by bootstrap.sh and fetched in buildspec"
   type        = string
-}
-
-variable "github_token_secret_arn" {
-  description = "Secrets Manager secret ARN whose value is the GitHub PAT (injected as TF_VAR_github_token)"
-  type        = string
+  sensitive   = true
 }

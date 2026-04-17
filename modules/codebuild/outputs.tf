@@ -17,8 +17,3 @@ output "service_role_arn" {
   value       = aws_iam_role.codebuild.arn
 }
 
-output "webhook_url" {
-  description = "GitHub webhook payload URL (automatically configured via GitHub OAuth)"
-  value       = aws_codebuild_webhook.banking.payload_url
-  sensitive   = true
-}

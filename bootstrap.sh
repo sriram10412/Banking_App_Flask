@@ -1,26 +1,22 @@
 #!/bin/bash
 ###############################################################################
-# bootstrap.sh – Run ONCE locally before the first Terraform apply
+# bootstrap.sh – Idempotent prereq setup (runs in CodeBuild install phase)
 #
 # Creates prerequisites that must exist before Terraform can run:
 #   1. S3 bucket  – Terraform remote state
 #   2. DynamoDB   – Terraform state lock
-#   3. Secrets Manager secret – DB master password (referenced by CodeBuild)
+#   3. Secrets Manager secret – DB master password  (from $DB_PASSWORD env var)
+#   4. Secrets Manager secret – GitHub token        (from $GITHUB_TOKEN env var)
 #
-# After this script succeeds:
-#   1. Copy the printed db_password_secret_arn into terraform.tfvars
-#   2. export TF_VAR_github_token=<your-PAT>
-#   3. export TF_VAR_db_password=<your-db-password>   (same value stored above)
-#   4. terraform init && terraform apply -var-file="environments/prod/terraform.tfvars"
-#      → This creates ALL infrastructure including the CodeBuild project.
-#   5. Push to main – CodeBuild webhook triggers the pipeline automatically.
+# Safe to run on every build — all operations are idempotent.
 ###############################################################################
 set -euo pipefail
 
 ACCOUNT_ID="842548752774"
 REGION="us-east-1"
 BUCKET_NAME="bankingpromo1234"
-SECRET_NAME="prod/banking-app/db-master-password"
+DB_SECRET_NAME="prod/banking-app/db-master-password"
+GH_SECRET_NAME="prod/banking-app/github-token"
 
 echo "======================================"
 echo " Banking App Bootstrap (CodeBuild)"
@@ -30,7 +26,7 @@ echo "======================================"
 
 # ── 1. S3 state bucket ────────────────────────────────────────────────────────
 echo ""
-echo "[1/3] S3 state bucket..."
+echo "[1/4] S3 state bucket..."
 # us-east-1 is the S3 default – LocationConstraint must be omitted for it
 if [ "${REGION}" = "us-east-1" ]; then
   aws s3api create-bucket --bucket "${BUCKET_NAME}" --region "${REGION}" 2>/dev/null \
@@ -59,7 +55,7 @@ echo "  S3 bucket ready."
 
 # ── 2. DynamoDB lock table ─────────────────────────────────────────────────────
 echo ""
-echo "[2/3] DynamoDB lock table..."
+echo "[2/4] DynamoDB lock table..."
 aws dynamodb create-table \
   --table-name banking-app-tfstate-lock \
   --attribute-definitions AttributeName=LockID,AttributeType=S \
@@ -70,65 +66,54 @@ aws dynamodb create-table \
 
 # ── 3. Secrets Manager – DB master password ────────────────────────────────────
 echo ""
-echo "[3/3] Secrets Manager secret for DB password..."
+echo "[3/4] Secrets Manager secret for DB password..."
 
-if [ -z "${TF_VAR_db_password:-}" ]; then
-  echo ""
-  echo "  ERROR: TF_VAR_db_password is not set."
-  echo "  Export it before running bootstrap:"
-  echo "    export TF_VAR_db_password='<your-secure-password>'"
+if [ -z "${DB_PASSWORD:-}" ]; then
+  echo "  ERROR: DB_PASSWORD env var is not set."
   exit 1
 fi
 
-SECRET_ARN=$(aws secretsmanager create-secret \
-  --name "${SECRET_NAME}" \
-  --description "Banking App RDS master password (used by CodeBuild as TF_VAR_db_password)" \
-  --secret-string "${TF_VAR_db_password}" \
+aws secretsmanager create-secret \
+  --name "${DB_SECRET_NAME}" \
+  --description "Banking App RDS master password" \
+  --secret-string "${DB_PASSWORD}" \
   --region "${REGION}" \
-  --query 'ARN' \
-  --output text 2>/dev/null) \
+  --query 'ARN' --output text 2>/dev/null \
   && echo "  Secret created." \
   || {
-    # Secret already exists – update its value
-    SECRET_ARN=$(aws secretsmanager put-secret-value \
-      --secret-id "${SECRET_NAME}" \
-      --secret-string "${TF_VAR_db_password}" \
-      --region "${REGION}" \
-      --query 'ARN' \
-      --output text)
+    aws secretsmanager put-secret-value \
+      --secret-id "${DB_SECRET_NAME}" \
+      --secret-string "${DB_PASSWORD}" \
+      --region "${REGION}" > /dev/null
     echo "  Secret already exists – value updated."
   }
 
-# Retrieve ARN in case the create path set it, put-secret-value path doesn't
-if [ -z "${SECRET_ARN:-}" ]; then
-  SECRET_ARN=$(aws secretsmanager describe-secret \
-    --secret-id "${SECRET_NAME}" \
-    --region "${REGION}" \
-    --query 'ARN' \
-    --output text)
+# ── 4. Secrets Manager – GitHub token ─────────────────────────────────────────
+echo ""
+echo "[4/4] Secrets Manager secret for GitHub token..."
+
+if [ -z "${GITHUB_TOKEN:-}" ]; then
+  echo "  ERROR: GITHUB_TOKEN env var is not set."
+  exit 1
 fi
+
+aws secretsmanager create-secret \
+  --name "${GH_SECRET_NAME}" \
+  --description "Banking App GitHub PAT" \
+  --secret-string "${GITHUB_TOKEN}" \
+  --region "${REGION}" \
+  --query 'ARN' --output text 2>/dev/null \
+  && echo "  Secret created." \
+  || {
+    aws secretsmanager put-secret-value \
+      --secret-id "${GH_SECRET_NAME}" \
+      --secret-string "${GITHUB_TOKEN}" \
+      --region "${REGION}" > /dev/null
+    echo "  Secret already exists – value updated."
+  }
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 echo "======================================"
-echo " Bootstrap complete! Next steps:"
+echo " Bootstrap complete."
 echo "======================================"
-echo ""
-echo "  1. Fill in terraform.tfvars:"
-echo "       db_password_secret_arn = \"${SECRET_ARN}\""
-echo ""
-echo "  2. Create a GitHub PAT with scopes: repo, admin:repo_hook"
-echo "     https://github.com/settings/tokens/new"
-echo ""
-echo "  3. Run the first Terraform apply:"
-echo ""
-echo "       export TF_VAR_github_token='<your-PAT>'"
-echo "       export TF_VAR_db_password='${TF_VAR_db_password}'"
-echo "       terraform init"
-echo "       terraform apply -var-file=\"environments/prod/terraform.tfvars\""
-echo ""
-echo "     This creates all infrastructure AND the CodeBuild project."
-echo ""
-echo "  4. Push to the main branch – the CodeBuild webhook will trigger"
-echo "     the pipeline automatically on every subsequent push."
-echo ""

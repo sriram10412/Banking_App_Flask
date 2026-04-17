@@ -29,7 +29,8 @@ app_image_tag     = "latest"
 # CodeBuild / CI
 github_repo   = "sriram10412/Banking_App_Flask"
 github_branch = "main"
-# github_token is sensitive – pass via: export TF_VAR_github_token=<PAT>
-# db_password_secret_arn is printed by bootstrap.sh – fill in after running it:
-db_password_secret_arn  = "arn:aws:secretsmanager:us-east-1:842548752774:secret:prod/banking-app/db-master-password-eZfMp5"
-github_token_secret_arn = "arn:aws:secretsmanager:us-east-1:842548752774:secret:prod/banking-app/github-token-jmKeQz"
+# github_token and db_password are sensitive – pass via TF_VAR_* env vars:
+#   export TF_VAR_github_token=<PAT>
+#   export TF_VAR_db_password=<password>
+# In CodeBuild these are set as PLAINTEXT env vars and bootstrap.sh stores
+# them in Secrets Manager before terraform runs.

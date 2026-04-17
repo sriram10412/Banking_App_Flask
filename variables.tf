@@ -112,15 +112,5 @@ variable "github_token" {
   sensitive   = true
 }
 
-variable "db_password_secret_arn" {
-  description = "Secrets Manager secret ARN containing the DB master password (created by bootstrap.sh)"
-  type        = string
-}
-
-variable "github_token_secret_arn" {
-  description = "Secrets Manager secret ARN containing the GitHub PAT (created by bootstrap.sh)"
-  type        = string
-}
-
 
 ###############################################################################

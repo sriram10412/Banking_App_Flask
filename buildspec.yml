@@ -22,7 +22,10 @@ phases:
       - mv terraform /usr/local/bin/
       - terraform -version
       - pip install -q -r requirements.txt
-      - apt-get install -y -q jq 2>/dev/null || yum install -y jq >/dev/null 2>&1 || true
+      - echo "Running bootstrap (S3 / DynamoDB / Secrets Manager)..."
+      - bash bootstrap.sh
+      - export TF_VAR_db_password=$(aws secretsmanager get-secret-value --secret-id prod/banking-app/db-master-password --query SecretString --output text --region ${AWS_DEFAULT_REGION})
+      - export TF_VAR_github_token=$(aws secretsmanager get-secret-value --secret-id prod/banking-app/github-token --query SecretString --output text --region ${AWS_DEFAULT_REGION})
 
   pre_build:
     commands:
@@ -46,20 +49,15 @@ phases:
 
   post_build:
     commands:
-      - echo "Updating ECS task definition..."
-      - |
-        aws ecs describe-task-definition --task-definition ${ECS_TASK_DEFINITION} --region ${AWS_DEFAULT_REGION} --query taskDefinition --output json > /tmp/taskdef.json
-        jq --arg IMAGE "$IMAGE_URI" '.containerDefinitions[0].image=$IMAGE | del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.placementConstraints,.compatibilities,.registeredAt,.registeredBy)' /tmp/taskdef.json > /tmp/newtaskdef.json
-        cat /tmp/newtaskdef.json
-        NEW_TASK_ARN=$(aws ecs register-task-definition --region ${AWS_DEFAULT_REGION} --cli-input-json file:///tmp/newtaskdef.json --query taskDefinition.taskDefinitionArn --output text)
-        echo "Registered $NEW_TASK_ARN"
-        aws ecs update-service --cluster ${ECS_CLUSTER_NAME} --service ${ECS_SERVICE_NAME} --task-definition $NEW_TASK_ARN --force-new-deployment --region ${AWS_DEFAULT_REGION}
+      # Terraform already updated the task definition via app_image_tag.
+      # Force a new deployment to pull the image that was just pushed.
+      - aws ecs update-service --cluster ${ECS_CLUSTER_NAME} --service ${ECS_SERVICE_NAME} --force-new-deployment --region ${AWS_DEFAULT_REGION}
       - echo "Waiting for ECS service to stabilise..."
       - aws ecs wait services-stable --cluster ${ECS_CLUSTER_NAME} --services ${ECS_SERVICE_NAME} --region ${AWS_DEFAULT_REGION}
       - |
         ALB_DNS=$(aws elbv2 describe-load-balancers --names ${ALB_NAME} --region ${AWS_DEFAULT_REGION} --query LoadBalancers[0].DNSName --output text)
         echo "App is live at http://$ALB_DNS"
-        sleep 30
+        sleep 15
         curl -f http://$ALB_DNS/health && echo "Health check passed!"
 
 artifacts:

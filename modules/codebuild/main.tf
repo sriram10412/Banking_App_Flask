@@ -64,15 +64,15 @@ resource "aws_codebuild_project" "banking" {
     privileged_mode = true
 
     environment_variable {
-      name  = "TF_VAR_db_password"
-      value = var.db_password_secret_arn
-      type  = "SECRETS_MANAGER"
+      name  = "DB_PASSWORD"
+      value = var.db_password
+      type  = "PLAINTEXT"
     }
 
     environment_variable {
-      name  = "TF_VAR_github_token"
-      value = var.github_token_secret_arn
-      type  = "SECRETS_MANAGER"
+      name  = "GITHUB_TOKEN"
+      value = var.github_token
+      type  = "PLAINTEXT"
     }
   }
 
@@ -88,12 +88,11 @@ resource "aws_codebuild_project" "banking" {
   tags = { Name = "${var.environment}-banking-codebuild" }
 }
 
-# ── Webhook (auto-build on push to branch) ────────────────────────────────────
+# ── Webhook (auto-build on push / PR targeting main) ─────────────────────────
 resource "aws_codebuild_webhook" "banking" {
   project_name = aws_codebuild_project.banking.name
   build_type   = "BUILD"
 
-  # Trigger on push to main
   filter_group {
     filter {
       type    = "EVENT"
@@ -105,7 +104,6 @@ resource "aws_codebuild_webhook" "banking" {
     }
   }
 
-  # Trigger on PR opened or updated targeting main
   filter_group {
     filter {
       type    = "EVENT"
