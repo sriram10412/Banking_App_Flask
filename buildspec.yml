@@ -1,0 +1,141 @@
+version: 0.2
+
+env:
+  variables:
+    TF_VERSION: "1.7.5"
+    TF_PLUGIN_CACHE_DIR: "/root/.terraform.d/plugin-cache"
+
+phases:
+
+  install:
+    runtime-versions:
+      python: 3.12
+
+    commands:
+
+      - echo "Installing Terraform..."
+
+      - wget https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip
+      - unzip terraform_${TF_VERSION}_linux_amd64.zip
+      - mv terraform /usr/local/bin/
+
+      - terraform -version
+
+      - echo "Installing dependencies..."
+
+      - pip install -r requirements.txt
+
+      - echo "Installing Docker tools..."
+
+      - yum install -y jq
+
+  pre_build:
+    commands:
+
+      - echo "Running bootstrap..."
+
+      - chmod +x bootstrap.sh
+      - ./bootstrap.sh || true
+
+      - echo "Logging into Amazon ECR..."
+
+      - aws ecr get-login-password \
+        --region $AWS_DEFAULT_REGION \
+        | docker login \
+          --username AWS \
+          --password-stdin \
+          $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+
+  build:
+    commands:
+
+      - echo "Terraform Init..."
+
+      - mkdir -p "${TF_PLUGIN_CACHE_DIR}"
+
+      - terraform init \
+        -backend-config="region=${AWS_DEFAULT_REGION}"
+
+      - echo "Terraform Plan..."
+
+      - terraform plan \
+        -var-file="environments/prod/terraform.tfvars" \
+        -var="app_image_tag=$CODEBUILD_RESOLVED_SOURCE_VERSION" \
+        -out=tfplan
+
+      - echo "Terraform Apply..."
+
+      - terraform apply -auto-approve tfplan
+
+      - echo "Building Docker Image..."
+
+      - export IMAGE_TAG=$CODEBUILD_RESOLVED_SOURCE_VERSION
+
+      - export ECR_REPO=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/prod-banking-app
+
+      - docker build \
+          -t $ECR_REPO:$IMAGE_TAG \
+          -t $ECR_REPO:latest \
+          .
+
+      - echo "Pushing Docker Image..."
+
+      - docker push $ECR_REPO:$IMAGE_TAG
+      - docker push $ECR_REPO:latest
+
+  post_build:
+    commands:
+
+      - echo "Deploying to ECS..."
+
+      - TASK_DEF=$(aws ecs describe-task-definition \
+          --task-definition prod-banking-app \
+          --region $AWS_DEFAULT_REGION \
+          --query 'taskDefinition' \
+          --output json)
+
+      - NEW_TASK_DEF=$(echo $TASK_DEF | jq \
+          --arg IMAGE "$ECR_REPO:$IMAGE_TAG" \
+          '.containerDefinitions[0].image=$IMAGE
+           | del(.taskDefinitionArn,.revision,.status,.requiresAttributes,
+                 .placementConstraints,.compatibilities,
+                 .registeredAt,.registeredBy)')
+
+      - NEW_TASK_ARN=$(aws ecs register-task-definition \
+          --region $AWS_DEFAULT_REGION \
+          --cli-input-json "$NEW_TASK_DEF" \
+          --query 'taskDefinition.taskDefinitionArn' \
+          --output text)
+
+      - aws ecs update-service \
+          --cluster $ECS_CLUSTER_NAME \
+          --service $ECS_SERVICE_NAME \
+          --task-definition $NEW_TASK_ARN \
+          --force-new-deployment \
+          --region $AWS_DEFAULT_REGION
+
+      - echo "Waiting for ECS stabilization..."
+
+      - aws ecs wait services-stable \
+          --cluster $ECS_CLUSTER_NAME \
+          --services $ECS_SERVICE_NAME
+
+      - echo "Fetching ALB URL..."
+
+      - ALB_DNS=$(aws elbv2 describe-load-balancers \
+          --names prod-banking-alb \
+          --region $AWS_DEFAULT_REGION \
+          --query 'LoadBalancers[0].DNSName' \
+          --output text)
+
+      - echo "Running Smoke Test..."
+
+      - sleep 20
+
+      - curl -f http://$ALB_DNS/health
+
+      - echo "Deployment successful!"
+
+artifacts:
+  files:
+    - tfplan

@@ -150,6 +150,8 @@ def deposit(account_id: str, payload: AmountRequest, db: Session = Depends(get_d
 @app.post("/accounts/{account_id}/withdraw", response_model=AccountResponse)
 def withdraw(account_id: str, payload: AmountRequest, db: Session = Depends(get_db)):
     acct = get_account_or_404(account_id, db)
+    if payload.amount < 0:
+        logger.wa
     if acct.balance < payload.amount:
         logger.warning(
             "TRANSACTION_FAILED account_id=%s reason=insufficient_funds", account_id
@@ -165,3 +167,13 @@ def withdraw(account_id: str, payload: AmountRequest, db: Session = Depends(get_
         acct.balance,
     )
     return acct
+
+@app.get("/accounts/all", response_model=list[AccountResponse])
+def list_accounts(db: Session = Depends(get_db)):
+    logger.info(
+        "DEPOSIT account_id=%s amount=%s new_balance=%s",
+        account_id,
+        payload.amount,
+        acct.balance,
+    )
+    return db.query(Account).all()  
