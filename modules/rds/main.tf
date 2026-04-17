@@ -73,10 +73,10 @@ resource "aws_db_instance" "main" {
   multi_az = false
 
   # Backups
-  backup_retention_period   = 0
-  backup_window             = "02:00-03:00"
-  maintenance_window        = "sun:04:00-sun:05:00"
-  delete_automated_backups  = false
+  backup_retention_period  = 0
+  backup_window            = "02:00-03:00"
+  maintenance_window       = "sun:04:00-sun:05:00"
+  delete_automated_backups = false
   #deletion_protection       = true # creatiing unnecessary issue during destroy
   deletion_protection       = true
   skip_final_snapshot       = false
@@ -129,8 +129,8 @@ resource "aws_secretsmanager_secret" "db_credentials" {
   recovery_window_in_days = 0
   kms_key_id              = aws_kms_key.rds.arn
 
-  tags = { 
-    Name = "${var.environment}-db-credentials"
+  tags = {
+    Name      = "${var.environment}-db-credentials"
     ManagedBy = "Terraform"
   }
 }

@@ -87,8 +87,8 @@ resource "aws_security_group" "rds" {
 
 # ── Network ACLs (additional layer) ─────────────────────────────────────────
 resource "aws_network_acl" "private" {
-  vpc_id     = var.vpc_id
-  tags       = { Name = "${var.environment}-private-nacl" }
+  vpc_id = var.vpc_id
+  tags   = { Name = "${var.environment}-private-nacl" }
 }
 
 resource "aws_network_acl_rule" "private_inbound_vpc" {

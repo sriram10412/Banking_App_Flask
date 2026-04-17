@@ -57,10 +57,10 @@ resource "aws_ecs_task_definition" "app" {
       }]
 
       environment = [
-        { name = "APP_ENV",  value = var.environment },
-        { name = "DB_HOST",  value = var.db_host },
-        { name = "DB_NAME",  value = var.db_name },
-        { name = "DB_USER",  value = var.db_username },
+        { name = "APP_ENV", value = var.environment },
+        { name = "DB_HOST", value = var.db_host },
+        { name = "DB_NAME", value = var.db_name },
+        { name = "DB_USER", value = var.db_username },
         { name = "APP_PORT", value = "8080" }
       ]
 
@@ -69,12 +69,12 @@ resource "aws_ecs_task_definition" "app" {
         valueFrom = "${var.db_secret_arn}:password::"
       }]
 
-     logConfiguration = {
+      logConfiguration = {
         logDriver = "awslogs"
         options = {
-           "awslogs-group"         = "/ecs/${var.environment}/banking-app"
-           "awslogs-region"        = var.aws_region
-           "awslogs-stream-prefix" = "ecs"
+          "awslogs-group"         = "/ecs/${var.environment}/banking-app"
+          "awslogs-region"        = var.aws_region
+          "awslogs-stream-prefix" = "ecs"
         }
       }
 
@@ -104,14 +104,14 @@ resource "aws_ecs_task_definition" "app" {
 
 # ── ECS Service ───────────────────────────────────────────────────────────────
 resource "aws_ecs_service" "app" {
-  name                               = "${var.environment}-banking-service"
-  cluster                            = aws_ecs_cluster.main.id
-  task_definition                    = aws_ecs_task_definition.app.arn
-  desired_count                      = var.desired_count
-  launch_type                        = "FARGATE"
-  platform_version                   = "LATEST"
-  health_check_grace_period_seconds  = 120
-  enable_execute_command             = false   # disable in prod; enable for debugging
+  name                              = "${var.environment}-banking-service"
+  cluster                           = aws_ecs_cluster.main.id
+  task_definition                   = aws_ecs_task_definition.app.arn
+  desired_count                     = var.desired_count
+  launch_type                       = "FARGATE"
+  platform_version                  = "LATEST"
+  health_check_grace_period_seconds = 120
+  enable_execute_command            = false # disable in prod; enable for debugging
 
   network_configuration {
     subnets          = var.private_subnet_ids

@@ -137,7 +137,7 @@ resource "aws_codebuild_project" "banking" {
 
   depends_on = [aws_codebuild_source_credential.github]
 
-  tags = { 
+  tags = {
     Name        = "${var.environment}-banking-codebuild"
     Environment = var.environment
     ManagedBy   = "Terraform"
@@ -148,7 +148,7 @@ resource "aws_codebuild_project" "banking" {
 resource "aws_cloudwatch_log_group" "codebuild" {
   name              = "/codebuild/${var.environment}-banking"
   retention_in_days = 7
-  skip_destroy      = true  # Prevent deletion on terraform destroy
+  skip_destroy      = true # Prevent deletion on terraform destroy
 
   tags = {
     Name        = "${var.environment}-banking-codebuild-logs"

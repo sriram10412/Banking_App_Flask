@@ -71,7 +71,7 @@ resource "aws_lb" "main" {
   subnets            = var.public_subnet_ids
 
   #enable_deletion_protection = true
-  enable_deletion_protection = false  # creating unnecessary issue during destroy 
+  enable_deletion_protection = false # creating unnecessary issue during destroy 
 
   access_logs {
     bucket  = aws_s3_bucket.alb_logs.id
@@ -93,17 +93,17 @@ resource "aws_lb_target_group" "app" {
   port        = 8080
   protocol    = "HTTP"
   vpc_id      = var.vpc_id
-  target_type = "ip"   # required for Fargate
+  target_type = "ip" # required for Fargate
 
   health_check {
-    enabled             = true
-    path                = "/health"
-    protocol            = "HTTP"
-    matcher             = "200"
-    interval            = 30
-    timeout             = 10
-  
-    healthy_threshold   = 2
+    enabled  = true
+    path     = "/health"
+    protocol = "HTTP"
+    matcher  = "200"
+    interval = 30
+    timeout  = 10
+
+    healthy_threshold = 2
 
     unhealthy_threshold = 3
   }
