@@ -13,6 +13,7 @@
 ###############################################################################
 set -euo pipefail
 
+
 ACCOUNT_ID="${AWS_ACCOUNT_ID:-603196661038}"
 REGION="${AWS_DEFAULT_REGION:-ap-southeast-1}"
 BUCKET_NAME="${TF_STATE_BUCKET:-banking-app-tfstate}"
