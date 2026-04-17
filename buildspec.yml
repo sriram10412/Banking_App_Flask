@@ -1,0 +1,61 @@
+version: 0.2
+
+env:
+  variables:
+    TF_VERSION: "1.7.5"
+    # All other values (AWS_ACCOUNT_ID, AWS_DEFAULT_REGION, ECR/ECS/ALB names,
+    # DB_PASSWORD, GH_PAT) are injected by the CodeBuild project env vars
+    # defined in modules/codebuild/main.tf via Terraform.
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.12
+    commands:
+      - echo "Installing Terraform ${TF_VERSION}..."
+      - wget -q https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip
+      - unzip -q terraform_${TF_VERSION}_linux_amd64.zip
+      - mv terraform /usr/local/bin/
+      - terraform -version
+      - pip install -q -r requirements.txt
+      - echo "Running bootstrap (S3 / DynamoDB / Secrets Manager)..."
+      - bash bootstrap.sh
+      - export TF_VAR_db_password=$(aws secretsmanager get-secret-value --secret-id prod/banking-app/db-master-password --query SecretString --output text --region ${AWS_DEFAULT_REGION})
+      - export TF_VAR_github_token=$(aws secretsmanager get-secret-value --secret-id prod/banking-app/github-token --query SecretString --output text --region ${AWS_DEFAULT_REGION})
+
+  pre_build:
+    commands:
+      - echo "Logging into ECR..."
+      - aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com
+      - IMAGE_TAG=${CODEBUILD_RESOLVED_SOURCE_VERSION}
+      - IMAGE_URI=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPOSITORY_NAME}:${IMAGE_TAG}
+      - echo "Image URI ${IMAGE_URI}"
+
+  build:
+    commands:
+      - echo "Initializing Terraform..."
+      - terraform init -backend-config="region=${AWS_DEFAULT_REGION}" -upgrade
+      - terraform validate
+      - terraform plan -var-file="environments/prod/terraform.tfvars" -var="app_image_tag=${IMAGE_TAG}" -out=tfplan
+      - terraform apply -auto-approve tfplan
+      - echo "Building and pushing Docker image..."
+      - docker build -t ${IMAGE_URI} -t ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPOSITORY_NAME}:latest .
+      - docker push ${IMAGE_URI}
+      - docker push ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPOSITORY_NAME}:latest
+
+  post_build:
+    commands:
+      # Terraform already updated the task definition via app_image_tag.
+      # Force a new deployment to pull the image that was just pushed.
+      - aws ecs update-service --cluster ${ECS_CLUSTER_NAME} --service ${ECS_SERVICE_NAME} --force-new-deployment --region ${AWS_DEFAULT_REGION}
+      - echo "Waiting for ECS service to stabilise..."
+      - aws ecs wait services-stable --cluster ${ECS_CLUSTER_NAME} --services ${ECS_SERVICE_NAME} --region ${AWS_DEFAULT_REGION}
+      - |
+        ALB_DNS=$(aws elbv2 describe-load-balancers --names ${ALB_NAME} --region ${AWS_DEFAULT_REGION} --query LoadBalancers[0].DNSName --output text)
+        echo "App is live at http://$ALB_DNS"
+        sleep 15
+        curl -f http://$ALB_DNS/health && echo "Health check passed!"
+
+artifacts:
+  files:
+    - tfplan

@@ -1,0 +1,138 @@
+###############################################################################
+# .github/workflows/pipeline.yml  –  Bootstrap only (Option 2)
+#
+# This workflow ONLY creates AWS infrastructure via Terraform.
+# After the CodeBuild project is created, GitHub webhook will automatically
+# trigger builds on every push/PR. No manual start-build call needed.
+#
+# Required GitHub Secrets (Settings -> Secrets and variables -> Actions):
+#   AWS_ACCESS_KEY_ID       - IAM user access key
+#   AWS_SECRET_ACCESS_KEY   - IAM user secret key
+#   AWS_ACCOUNT_ID          - 603196661038
+#   AWS_DEFAULT_REGION      - ap-southeast-1
+#   TF_STATE_BUCKET         - banking-app-tfstate
+#   TF_VAR_DB_PASSWORD      - RDS master password (no /, @, ", spaces)
+#   GH_PAT                  - GitHub PAT (repo + admin:repo_hook scopes)
+###############################################################################
+
+name: Bootstrap
+
+on:
+  push:
+    branches: [main, feature/codebuild-setup]
+    paths:
+      - 'terraform/**'
+      - 'bootstrap.sh'
+      - '.github/workflows/pipeline.yml'
+  workflow_dispatch:
+
+env:
+  TF_VERSION: "1.7.5"
+
+jobs:
+  bootstrap:
+    name: Bootstrap AWS Resources
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_DEFAULT_REGION }}
+
+      - name: Bootstrap shared resources (S3, DynamoDB, Secrets Manager)
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+          TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
+          DB_PASSWORD: ${{ secrets.TF_VAR_DB_PASSWORD }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: bash bootstrap.sh
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Release stale Terraform state lock
+        run: |
+          aws dynamodb delete-item \
+            --table-name banking-app-tfstate-lock \
+            --key '{"LockID": {"S": "banking-app-tfstate/prod/terraform.tfstate"}}' \
+            --region ${{ secrets.AWS_DEFAULT_REGION }} || true
+
+      - name: Terraform Init
+        run: |
+          terraform init \
+            -backend-config="region=${{ secrets.AWS_DEFAULT_REGION }}"
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Validate
+        run: terraform validate 
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          terraform plan \
+            -var-file="environments/prod/terraform.tfvars" \
+            -out=tfplan
+
+      - name: Create / update CodeBuild project
+        run: |
+          terraform apply -auto-approve tfplan
+
+      - name: Verify CodeBuild project created
+        run: |
+          echo "Checking if CodeBuild project exists..."
+          aws codebuild batch-get-projects \
+            --names prod-banking-codebuild \
+            --region ${{ secrets.AWS_DEFAULT_REGION }} \
+            --query 'projects[0].[name,arn]' \
+            --output table
+          
+          if [ $? -eq 0 ]; then
+            echo "✓ CodeBuild project verified"
+          else
+            echo "✗ CodeBuild project not found"
+            exit 1
+          fi
+
+      - name: Verify GitHub webhook registered
+        run: |
+          echo "Checking if webhook is registered on GitHub repo..."
+          WEBHOOK=$(curl -s \
+            -H "Authorization: token ${{ secrets.GH_PAT }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/hooks" \
+            | grep -c "codebuild")
+          
+          if [ $WEBHOOK -gt 0 ]; then
+            echo "✓ GitHub webhook verified"
+          else
+            echo "⚠️  Webhook not found yet (may take a moment to register)"
+          fi
+
+      - name: Summary
+        run: |
+          echo "=========================================="
+          echo "✓ Bootstrap Complete"
+          echo "=========================================="
+          echo ""
+          echo "What happened:"
+          echo "  1. AWS infrastructure created via Terraform"
+          echo "  2. CodeBuild project: prod-banking-codebuild"
+          echo "  3. GitHub webhook registered automatically"
+          echo ""
+          echo "Next steps:"
+          echo "  • Push code to main or feature/codebuild-setup"
+          echo "  • GitHub will automatically trigger CodeBuild"
+          echo "  • Monitor builds: AWS CodeBuild → Build history"
+          echo ""
+          echo "View logs: https://console.aws.amazon.com/codesuite/codebuild/projects"
+          echo "=========================================="
