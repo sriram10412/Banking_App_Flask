@@ -67,3 +67,22 @@ jobs:
             -var-file="environments/prod/terraform.tfvars" \
             -target=module.codebuild \
             -auto-approve
+
+      # ✓ ADD THIS STEP ✓
+      - name: Trigger CodeBuild
+        run: |
+          aws codebuild start-build \
+            --project-name banking-app-build \
+            --source-version ${{ github.ref }}
+
+      - name: Wait for CodeBuild completion (optional)
+        run: |
+          BUILD_ID=$(aws codebuild start-build \
+            --project-name banking-app-build \
+            --source-version ${{ github.ref }} \
+            --query 'build.id' --output text)
+          
+          aws codebuild batch-get-builds \
+            --ids $BUILD_ID \
+            --query 'builds[0].buildStatus' \
+            --output text
