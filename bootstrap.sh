@@ -27,15 +27,17 @@ echo "======================================"
 # ── 1. S3 state bucket ────────────────────────────────────────────────────────
 echo ""
 echo "[1/4] S3 state bucket..."
-if aws s3api head-bucket --bucket "${BUCKET_NAME}" --region "${REGION}" 2>/dev/null; then
-  echo "  Already exists — skipping configuration."
+BUCKET_CREATED=false
+if [ "${REGION}" = "us-east-1" ]; then
+  aws s3api create-bucket --bucket "${BUCKET_NAME}" --region "${REGION}" 2>/dev/null \
+    && BUCKET_CREATED=true
 else
-  if [ "${REGION}" = "us-east-1" ]; then
-    aws s3api create-bucket --bucket "${BUCKET_NAME}" --region "${REGION}"
-  else
-    aws s3api create-bucket --bucket "${BUCKET_NAME}" --region "${REGION}" \
-      --create-bucket-configuration LocationConstraint="${REGION}"
-  fi
+  aws s3api create-bucket --bucket "${BUCKET_NAME}" --region "${REGION}" \
+    --create-bucket-configuration LocationConstraint="${REGION}" 2>/dev/null \
+    && BUCKET_CREATED=true
+fi
+
+if [ "${BUCKET_CREATED}" = "true" ]; then
   aws s3api put-bucket-versioning \
     --bucket "${BUCKET_NAME}" \
     --versioning-configuration Status=Enabled
@@ -48,6 +50,8 @@ else
     --public-access-block-configuration \
     "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
   echo "  Created and configured."
+else
+  echo "  Already exists — skipping configuration."
 fi
 
 # ── 2. DynamoDB lock table ─────────────────────────────────────────────────────
