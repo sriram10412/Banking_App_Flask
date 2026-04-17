@@ -20,10 +20,6 @@ name: Bootstrap
 on:
   push:
     branches: [main, feature/codebuild-setup]
-    paths:
-      - 'terraform/**'
-      - 'bootstrap.sh'
-      - '.github/workflows/pipeline.yml'
   workflow_dispatch:
 
 permissions:
