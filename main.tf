@@ -23,6 +23,14 @@ terraform {
   }
 }
 
+data "aws_secretsmanager_secret_version" "db_password" {
+  secret_id = "prod/banking-app/db-master-password"
+}
+
+data "aws_secretsmanager_secret_version" "github_token" {
+  secret_id = "prod/banking-app/github-token"
+}
+
 provider "aws" {
   region = var.aws_region
 
@@ -82,7 +90,7 @@ module "rds" {
   rds_security_group_id = module.security.rds_sg_id
   db_name               = var.db_name
   db_username           = var.db_username
-  db_password           = var.db_password
+  db_password           = data.aws_secretsmanager_secret_version.db_password.secret_string
   db_instance_class     = var.db_instance_class
 }
 
@@ -128,8 +136,8 @@ module "codebuild" {
   aws_account_id  = var.aws_account_id
   github_repo     = var.github_repo
   github_branch   = var.github_branch
-  github_token    = var.github_token
-  db_password     = var.db_password
+  github_token    = data.aws_secretsmanager_secret_version.github_token.secret_string
+  db_password     = data.aws_secretsmanager_secret_version.db_password.secret_string
   tf_state_bucket = var.tf_state_bucket
 }
 

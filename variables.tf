@@ -57,11 +57,6 @@ variable "db_username" {
   default     = "banking_admin"
 }
 
-variable "db_password" {
-  description = "Database master password (use Secrets Manager in production)"
-  type        = string
-  sensitive   = true
-}
 
 variable "db_instance_class" {
   description = "RDS instance class"
@@ -106,11 +101,6 @@ variable "github_branch" {
   default     = "main"
 }
 
-variable "github_token" {
-  description = "GitHub Personal Access Token (repo + admin:repo_hook scopes). Pass via TF_VAR_github_token."
-  type        = string
-  sensitive   = true
-}
 
 variable "tf_state_bucket" {
   description = "S3 bucket name for Terraform remote state"
