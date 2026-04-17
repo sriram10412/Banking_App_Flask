@@ -3,8 +3,15 @@ version: 0.2
 env:
   variables:
     TF_VERSION: "1.7.5"
+    AWS_DEFAULT_REGION: "ap-southeast-1"
+    AWS_ACCOUNT_ID: "603196661038"
+    ECR_REPOSITORY_NAME: "prod-banking-app"
+    ECS_CLUSTER_NAME: "prod-banking-cluster"
+    ECS_SERVICE_NAME: "prod-banking-service"
+    ECS_TASK_DEFINITION: "prod-banking-app"
+    ALB_NAME: "prod-banking-alb"
   secrets-manager:
-    BANKING_PASSWORD: mybankingpassword:mybankingpassword
+    TF_VAR_DB_PASSWORD: mybankingpassword:mybankingpassword
 
 phases:
 
@@ -14,91 +21,115 @@ phases:
 
     commands:
 
-      - echo "Installing Terraform..."
+      - echo "Installing Terraform ${TF_VERSION}..."
 
-      - wget https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip
-      - unzip terraform_${TF_VERSION}_linux_amd64.zip
+      - wget -q https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip
+      - unzip -q terraform_${TF_VERSION}_linux_amd64.zip
       - mv terraform /usr/local/bin/
-
       - terraform -version
 
-      - echo "Installing dependencies..."
+      - echo "Installing Python dependencies..."
+      - pip install -q -r requirements.txt
 
-      - pip install -r requirements.txt
-
-      - echo "Installing Docker tools..."
-
-      - yum install -y jq
+      - echo "Installing jq for JSON processing..."
+      - yum install -y jq > /dev/null 2>&1
 
   pre_build:
     commands:
 
-      - echo "Running bootstrap..."
+      - echo "========================================="
+      - echo "PRE-BUILD PHASE"
+      - echo "========================================="
 
-      - chmod +x bootstrap.sh
-      - ./bootstrap.sh || true
-
-      - echo "Logging into Amazon ECR..."
-
+      - echo "Authenticating to Amazon ECR..."
       - aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com
+      - echo "✓ ECR Login successful"
+
+      - echo "Setting image variables..."
+      - IMAGE_TAG=${CODEBUILD_RESOLVED_SOURCE_VERSION}
+      - IMAGE_URI=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPOSITORY_NAME}:${IMAGE_TAG}
+      - echo "Image URI: $IMAGE_URI"
 
   build:
     commands:
 
-      - echo "Terraform Init..."
+      - echo "========================================="
+      - echo "BUILD PHASE - TERRAFORM"
+      - echo "========================================="
 
-      - terraform init -backend-config="region=${AWS_DEFAULT_REGION}"
+      - echo "Initializing Terraform..."
+      - terraform init -backend-config="region=${AWS_DEFAULT_REGION}" -upgrade
 
-      - echo "Terraform Plan..."
+      - echo "Validating Terraform configuration..."
+      - terraform validate
 
-      - terraform plan -var-file="environments/prod/terraform.tfvars" -var="app_image_tag=$CODEBUILD_RESOLVED_SOURCE_VERSION" -out=tfplan
+      - echo "Planning Terraform deployment..."
+      - terraform plan -var-file="environments/prod/terraform.tfvars" -var="app_image_tag=${IMAGE_TAG}" -out=tfplan
+      - echo "✓ Terraform plan successful"
 
-      - echo "Terraform Apply..."
-
+      - echo "Applying Terraform configuration (auto-approved)..."
       - terraform apply -auto-approve tfplan
+      - echo "✓ Infrastructure deployed successfully"
 
-      - echo "Building Docker Image..."
+      - echo "========================================="
+      - echo "BUILD PHASE - DOCKER IMAGE"
+      - echo "========================================="
 
-      - export IMAGE_TAG=$CODEBUILD_RESOLVED_SOURCE_VERSION
+      - echo "Building Docker image..."
+      - docker build -t ${IMAGE_URI} -t ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPOSITORY_NAME}:latest .
+      - echo "✓ Docker image built"
 
-      - export ECR_REPO=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/prod-banking-app
-
-      - docker build -t ${ECR_REPO}:${IMAGE_TAG} -t ${ECR_REPO}:latest .
-
-      - echo "Pushing Docker Image..."
-
-      - docker push ${ECR_REPO}:${IMAGE_TAG}
-      - docker push ${ECR_REPO}:latest
+      - echo "Pushing image to ECR..."
+      - docker push ${IMAGE_URI}
+      - docker push ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPOSITORY_NAME}:latest
+      - echo "✓ Docker image pushed to ECR"
 
   post_build:
     commands:
 
-      - echo "Deploying to ECS..."
+      - echo "========================================="
+      - echo "POST-BUILD PHASE - ECS DEPLOYMENT"
+      - echo "========================================="
 
-      - TASK_DEF=$(aws ecs describe-task-definition --task-definition prod-banking-app --region ${AWS_DEFAULT_REGION} --query 'taskDefinition' --output json)
+      - echo "Retrieving ECS task definition..."
+      - TASK_DEF=$(aws ecs describe-task-definition --task-definition ${ECS_TASK_DEFINITION} --region ${AWS_DEFAULT_REGION} --output json)
 
-      - NEW_TASK_DEF=$(echo $TASK_DEF | jq --arg IMAGE "${ECR_REPO}:${IMAGE_TAG}" '.containerDefinitions[0].image=$IMAGE | del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.placementConstraints,.compatibilities,.registeredAt,.registeredBy)')
+      - echo "Updating task definition with new image..."
+      - NEW_TASK_DEF=$(echo $TASK_DEF | jq --arg IMAGE "${IMAGE_URI}" '.containerDefinitions[0].image=$IMAGE | del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.placementConstraints,.compatibilities,.registeredAt,.registeredBy)')
 
-      - NEW_TASK_ARN=$(aws ecs register-task-definition --region ${AWS_DEFAULT_REGION} --cli-input-json "$NEW_TASK_DEF" --query 'taskDefinition.taskDefinitionArn' --output text)
+      - echo "Registering new task definition..."
+      - NEW_TASK_ARN=$(echo "$NEW_TASK_DEF" | aws ecs register-task-definition --region ${AWS_DEFAULT_REGION} --cli-input-json file:///dev/stdin --query 'taskDefinition.taskDefinitionArn' --output text)
+      - echo "New task definition ARN: $NEW_TASK_ARN"
 
+      - echo "Updating ECS service..."
       - aws ecs update-service --cluster ${ECS_CLUSTER_NAME} --service ${ECS_SERVICE_NAME} --task-definition ${NEW_TASK_ARN} --force-new-deployment --region ${AWS_DEFAULT_REGION}
+      - echo "✓ ECS service update initiated"
 
-      - echo "Waiting for ECS stabilization..."
+      - echo "Waiting for ECS service to stabilize (this may take 2-5 minutes)..."
+      - aws ecs wait services-stable --cluster ${ECS_CLUSTER_NAME} --services ${ECS_SERVICE_NAME} --region ${AWS_DEFAULT_REGION}
+      - echo "✓ ECS service stabilized"
 
-      - aws ecs wait services-stable --cluster ${ECS_CLUSTER_NAME} --services ${ECS_SERVICE_NAME}
+      - echo "========================================="
+      - echo "POST-BUILD PHASE - SMOKE TEST"
+      - echo "========================================="
 
-      - echo "Fetching ALB URL..."
+      - echo "Retrieving ALB DNS name..."
+      - ALB_DNS=$(aws elbv2 describe-load-balancers --names ${ALB_NAME} --region ${AWS_DEFAULT_REGION} --query 'LoadBalancers[0].DNSName' --output text)
+      - echo "ALB DNS: $ALB_DNS"
 
-      - ALB_DNS=$(aws elbv2 describe-load-balancers --names prod-banking-alb --region ${AWS_DEFAULT_REGION} --query 'LoadBalancers[0].DNSName' --output text)
+      - echo "Waiting for application to be ready..."
+      - sleep 30
 
-      - echo "Running Smoke Test..."
+      - echo "Running health check..."
+      - curl -f http://${ALB_DNS}/health && echo "✓ Health check passed" || (echo "✗ Health check failed" && exit 1)
 
-      - sleep 20
-
-      - curl -f http://${ALB_DNS}/health
-
-      - echo "Deployment successful!"
+      - echo "========================================="
+      - echo "✓ DEPLOYMENT SUCCESSFUL!"
+      - echo "========================================="
+      - echo "Application URL: http://${ALB_DNS}"
+      - echo "Image Tag: ${IMAGE_TAG}"
 
 artifacts:
   files:
     - tfplan
+  name: BuildArtifacts
