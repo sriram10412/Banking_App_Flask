@@ -77,7 +77,7 @@ jobs:
           terraform init \
             -backend-config="region=${{ secrets.AWS_DEFAULT_REGION }}"
 
-      - name: Release stale Terraform state lock
+      - name: Release stale Terraform state lock 
         run: |
           aws dynamodb delete-item \
             --table-name banking-app-tfstate-lock \
