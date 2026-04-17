@@ -76,11 +76,9 @@ resource "aws_db_instance" "main" {
   backup_retention_period  = 0
   backup_window            = "02:00-03:00"
   maintenance_window       = "sun:04:00-sun:05:00"
-  delete_automated_backups = false
-  #deletion_protection       = true # creatiing unnecessary issue during destroy
-  deletion_protection       = true
-  skip_final_snapshot       = false
-  final_snapshot_identifier = "${var.environment}-banking-db-final"
+  delete_automated_backups  = true
+  deletion_protection       = false
+  skip_final_snapshot       = true
 
   # Monitoring
   enabled_cloudwatch_logs_exports = ["postgresql", "upgrade"]

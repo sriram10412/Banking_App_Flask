@@ -7,7 +7,7 @@
 # ── S3 Bucket for ALB Access Logs ────────────────────────────────────────────
 resource "aws_s3_bucket" "alb_logs" {
   bucket        = "${var.environment}-banking-alb-logs-${data.aws_caller_identity.current.account_id}"
-  force_destroy = false
+  force_destroy = true
 
   tags = { Name = "${var.environment}-alb-access-logs" }
 }
