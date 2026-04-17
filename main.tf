@@ -15,9 +15,9 @@ terraform {
 
   # Remote state – update bucket/key/region before first run
   backend "s3" {
-    bucket         = "bankingpromo1234"
+    bucket         = "banking-app-tfstate"
     key            = "prod/terraform.tfstate"
-    region         = "us-east-1"
+    region         = "ap-southeast-1"
     encrypt        = true
     dynamodb_table = "banking-app-tfstate-lock"
   }

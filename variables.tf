@@ -115,7 +115,7 @@ variable "github_token" {
 variable "tf_state_bucket" {
   description = "S3 bucket name for Terraform remote state"
   type        = string
-  default     = "bankingpromo1234"
+  default     = "banking-app-tfstate"
 }
 
 

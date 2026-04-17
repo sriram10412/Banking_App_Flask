@@ -7,9 +7,9 @@
 # Required GitHub Secrets (Settings -> Secrets and variables -> Actions):
 #   AWS_ACCESS_KEY_ID       - IAM user access key
 #   AWS_SECRET_ACCESS_KEY   - IAM user secret key
-#   AWS_ACCOUNT_ID          - 842548752774
-#   AWS_DEFAULT_REGION      - us-east-1
-#   TF_STATE_BUCKET         - bankingpromo1234
+#   AWS_ACCOUNT_ID          - 603196661038
+#   AWS_DEFAULT_REGION      - ap-southeast-1
+#   TF_STATE_BUCKET         - banking-app-tfstate
 #   TF_VAR_DB_PASSWORD      - RDS master password
 #   GH_PAT                  - GitHub PAT (repo + admin:repo_hook scopes)
 ###############################################################################

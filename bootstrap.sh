@@ -13,9 +13,9 @@
 ###############################################################################
 set -euo pipefail
 
-ACCOUNT_ID="${AWS_ACCOUNT_ID:-842548752774}"
-REGION="${AWS_DEFAULT_REGION:-us-east-1}"
-BUCKET_NAME="${TF_STATE_BUCKET:-bankingpromo1234}"
+ACCOUNT_ID="${AWS_ACCOUNT_ID:-603196661038}"
+REGION="${AWS_DEFAULT_REGION:-ap-southeast-1}"
+BUCKET_NAME="${TF_STATE_BUCKET:-banking-app-tfstate}"
 DB_SECRET_NAME="prod/banking-app/db-master-password"
 GH_SECRET_NAME="prod/banking-app/github-token"
 
@@ -29,7 +29,7 @@ echo "======================================"
 echo ""
 echo "[1/4] S3 state bucket..."
 BUCKET_CREATED=false
-if [ "${REGION}" = "us-east-1" ]; then
+if [ "${REGION}" = "ap-southeast-1" ]; then
   aws s3api create-bucket --bucket "${BUCKET_NAME}" --region "${REGION}" 2>/dev/null \
     && BUCKET_CREATED=true
 else
