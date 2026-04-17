@@ -3,7 +3,6 @@ version: 0.2
 env:
   variables:
     TF_VERSION: "1.7.5"
-    TF_PLUGIN_CACHE_DIR: "/root/.terraform.d/plugin-cache"
   secrets-manager:
     BANKING_PASSWORD: mybankingpassword:mybankingpassword
 
@@ -47,8 +46,6 @@ phases:
     commands:
 
       - echo "Terraform Init..."
-
-      - mkdir -p "${TF_PLUGIN_CACHE_DIR}"
 
       - terraform init -backend-config="region=${AWS_DEFAULT_REGION}"
 
