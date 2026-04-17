@@ -1,4 +1,4 @@
-# Banking App – AWS Infrastructure (GitHub Actions)
+# Banking App – AWS Infrastructure
 
 ## Architecture
 
@@ -6,90 +6,151 @@
 Internet → ALB (HTTP:80) → ECS Fargate (port 8080) → RDS PostgreSQL
                                     ↑
                                ECR (Docker images)
+                                    ↑
+                          CodeBuild (CI/CD builds)
+                                    ↑
+                          GitHub Webhook (auto-trigger)
 ```
 
 ## Pipeline Flow
 
+### Infrastructure Bootstrap (GitHub Actions)
 ```
-push to main
+Push to main (terraform/infra changes)
      ↓
-bootstrap    → creates OIDC, S3, DynamoDB, IAM role (skips if exists)
+bootstrap job  → creates S3, DynamoDB, Secrets Manager via bootstrap.sh
      ↓
-terraform-plan   → auto
+Terraform Init → Init + Format Check + Validate
      ↓
-terraform-apply  → requires manual approval (GitHub Environment protection)
+Terraform Plan → plans infra changes
      ↓
-lint + build + test + security  → run in parallel
+Terraform Apply → creates VPC, RDS, ECS, ALB, ECR, CodeBuild, IAM, Monitoring
      ↓
-deploy-ecs   → ECS rolling deploy (auto)
-     ↓
-smoke-test   → hits /health → prints live URL
+approve-destroy (pauses, waits for manual approval via GitHub Issue comment)
+     ↓  (comment "approved" on the issue)
+Terraform Destroy → tears down all infrastructure
 ```
+
+### App Build & Deploy (AWS CodeBuild — auto-triggered on every push to main)
+```
+Push to main
+     ↓
+GitHub webhook → triggers CodeBuild automatically
+     ↓
+buildspec.yml → build Docker image → push to ECR → deploy to ECS
+```
+
+## Terraform Modules
+
+| Module | Resources Created |
+|--------|-------------------|
+| `vpc` | VPC, public/private subnets, route tables, NAT gateway, VPC flow logs |
+| `security` | Security groups for ALB, ECS, RDS |
+| `iam` | ECS task execution role, ECS task role, CodeBuild role |
+| `ecr` | ECR repository for Docker images |
+| `rds` | PostgreSQL RDS instance, subnet group, parameter group, Secrets Manager credentials |
+| `alb` | Application Load Balancer, target group, listener, S3 access logs bucket |
+| `ecs` | ECS cluster, Fargate task definition, ECS service |
+| `codebuild` | CodeBuild project, GitHub webhook, CloudWatch log group |
+| `monitoring` | CloudWatch alarms for ECS, ALB, RDS |
 
 ## Setup
 
-### Step 1 — Run bootstrap locally
-
-```bash
-# Edit bootstrap.sh and set your GitHub repo
-vim bootstrap.sh  # set GITHUB_REPO="your-username/banking_app_flask"
-
-chmod +x bootstrap.sh
-./bootstrap.sh
-```
-
-### Step 2 — Add GitHub Secrets
+### Step 1 — Add GitHub Secrets
 
 Go to **GitHub → Settings → Secrets and variables → Actions** and add:
 
 | Secret | Value |
 |--------|-------|
-| `AWS_ROLE_ARN` | printed by bootstrap.sh |
-| `AWS_ACCOUNT_ID` | your 12-digit AWS account ID |
+| `AWS_ACCESS_KEY_ID` | IAM user access key |
+| `AWS_SECRET_ACCESS_KEY` | IAM user secret key |
+| `AWS_ACCOUNT_ID` | `603196661038` |
 | `AWS_DEFAULT_REGION` | `ap-southeast-1` |
-| `AWS_ACCESS_KEY_ID` | your IAM user access key |
-| `AWS_SECRET_ACCESS_KEY` | your IAM user secret key |
-| `ECS_CLUSTER_NAME` | `prod-banking-cluster` |
-| `ECS_SERVICE_NAME` | `prod-banking-service` |
-| `TF_VAR_DB_PASSWORD` | your RDS password |
+| `TF_STATE_BUCKET` | `banking-app-tfstate` |
+| `TF_VAR_DB_PASSWORD` | RDS master password (no `/`, `@`, `"`, spaces) |
+| `GH_PAT` | GitHub PAT with `repo` + `admin:repo_hook` scopes |
 
-### Step 3 — Create GitHub Environments
-
-Go to **GitHub → Settings → Environments** and create:
-
-- `production` — add required reviewers for terraform apply approval
-- `destroy` — add required reviewers for destroy approval
-
-### Step 4 — Push to trigger pipeline
+### Step 2 — Push to trigger bootstrap
 
 ```bash
-git add .
-git commit -m "initial commit"
 git push origin main
 ```
+
+This runs the GitHub Actions bootstrap job which:
+1. Creates S3 bucket, DynamoDB table, and Secrets Manager secrets via `bootstrap.sh`
+2. Runs `terraform apply` to provision all AWS infrastructure
+3. Registers a GitHub webhook on the repo — CodeBuild will auto-trigger from now on
+
+### Step 3 — All future pushes auto-trigger CodeBuild
+
+```bash
+git push origin main  # CodeBuild builds, pushes to ECR, deploys to ECS automatically
+```
+
+## Sensitive Variables
+
+`db_password` and `github_token` are **not passed as Terraform variables**. They are read directly from AWS Secrets Manager at runtime using data sources:
+
+```
+prod/banking-app/db-master-password  →  used by RDS + CodeBuild
+prod/banking-app/github-token        →  used by CodeBuild webhook
+```
+
+These secrets are created by `bootstrap.sh` before Terraform runs.
+
+## Destroying Infrastructure
+
+To destroy all AWS infrastructure:
+
+1. Push to `main` to trigger the pipeline
+2. After the bootstrap job completes, the `approve-destroy` stage opens a GitHub Issue
+3. Comment `approved` on the issue
+4. The `destroy` job runs `terraform destroy` and tears down everything
 
 ## API Endpoints
 
 ```bash
-ALB="http://<alb-dns-from-pipeline-output>"
+ALB="http://<alb-dns-name>"
 
 curl ${ALB}/health
-curl -X POST ${ALB}/accounts -H "Content-Type: application/json" \
+
+curl -X POST ${ALB}/accounts \
+  -H "Content-Type: application/json" \
   -d '{"account_id":"ACC001","owner_name":"Alice","initial_balance":"1000.00"}'
+
 curl ${ALB}/accounts/ACC001/balance
-curl -X POST ${ALB}/accounts/ACC001/deposit -H "Content-Type: application/json" \
+
+curl -X POST ${ALB}/accounts/ACC001/deposit \
+  -H "Content-Type: application/json" \
   -d '{"amount":"500.00"}'
-curl -X POST ${ALB}/accounts/ACC001/withdraw -H "Content-Type: application/json" \
+
+curl -X POST ${ALB}/accounts/ACC001/withdraw \
+  -H "Content-Type: application/json" \
   -d '{"amount":"200.00"}'
 ```
 
-## Key Differences from GitLab
+## Project Structure
 
-| Feature | GitLab | GitHub |
-|---------|--------|--------|
-| CI file | `.gitlab-ci.yml` | `.github/workflows/pipeline.yml` |
-| OIDC provider | `gitlab.com` | `token.actions.githubusercontent.com` |
-| Manual approval | `when: manual` | GitHub Environment protection rules |
-| Artifacts | `artifacts:` | `actions/upload-artifact` |
-| Variables | CI/CD Variables | Repository Secrets |
-| Role name | `prod-gitlab-ci-role` | `prod-github-ci-role` |
+```
+.
+├── .github/workflows/pipeline.yml   # GitHub Actions bootstrap + destroy pipeline
+├── modules/
+│   ├── alb/                         # Application Load Balancer
+│   ├── codebuild/                   # CodeBuild project + GitHub webhook
+│   ├── ecr/                         # ECR repository
+│   ├── ecs/                         # ECS Fargate cluster + service
+│   ├── iam/                         # IAM roles and policies
+│   ├── monitoring/                  # CloudWatch alarms
+│   ├── rds/                         # RDS PostgreSQL
+│   ├── security/                    # Security groups
+│   └── vpc/                         # VPC and networking
+├── environments/prod/
+│   └── terraform.tfvars             # Production variable values
+├── app/                             # Flask application source
+├── bootstrap.sh                     # Creates S3, DynamoDB, Secrets Manager
+├── buildspec.yml                    # CodeBuild build specification
+├── Dockerfile                       # Docker image definition
+├── main.tf                          # Root Terraform config
+├── variables.tf                     # Root variable declarations
+└── outputs.tf                       # Root outputs
+```
