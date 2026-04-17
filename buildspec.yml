@@ -48,9 +48,10 @@ phases:
     commands:
       - echo "Updating ECS task definition..."
       - |
-        TASK_DEF=$(aws ecs describe-task-definition --task-definition ${ECS_TASK_DEFINITION} --region ${AWS_DEFAULT_REGION} --output json)
-        NEW_TASK_DEF=$(echo $TASK_DEF | jq --arg IMAGE "$IMAGE_URI" '.taskDefinition | .containerDefinitions[0].image=$IMAGE | del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.placementConstraints,.compatibilities,.registeredAt,.registeredBy)')
-        NEW_TASK_ARN=$(echo "$NEW_TASK_DEF" | aws ecs register-task-definition --region ${AWS_DEFAULT_REGION} --cli-input-json file:///dev/stdin --query taskDefinition.taskDefinitionArn --output text)
+        aws ecs describe-task-definition --task-definition ${ECS_TASK_DEFINITION} --region ${AWS_DEFAULT_REGION} --query taskDefinition --output json > /tmp/taskdef.json
+        jq --arg IMAGE "$IMAGE_URI" '.containerDefinitions[0].image=$IMAGE | del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.placementConstraints,.compatibilities,.registeredAt,.registeredBy)' /tmp/taskdef.json > /tmp/newtaskdef.json
+        cat /tmp/newtaskdef.json
+        NEW_TASK_ARN=$(aws ecs register-task-definition --region ${AWS_DEFAULT_REGION} --cli-input-json file:///tmp/newtaskdef.json --query taskDefinition.taskDefinitionArn --output text)
         echo "Registered $NEW_TASK_ARN"
         aws ecs update-service --cluster ${ECS_CLUSTER_NAME} --service ${ECS_SERVICE_NAME} --task-definition $NEW_TASK_ARN --force-new-deployment --region ${AWS_DEFAULT_REGION}
       - echo "Waiting for ECS service to stabilise..."
