@@ -27,31 +27,28 @@ echo "======================================"
 # ── 1. S3 state bucket ────────────────────────────────────────────────────────
 echo ""
 echo "[1/4] S3 state bucket..."
-# us-east-1 is the S3 default – LocationConstraint must be omitted for it
-if [ "${REGION}" = "us-east-1" ]; then
-  aws s3api create-bucket --bucket "${BUCKET_NAME}" --region "${REGION}" 2>/dev/null \
-    && echo "  Created" || echo "  Already exists"
+if aws s3api head-bucket --bucket "${BUCKET_NAME}" --region "${REGION}" 2>/dev/null; then
+  echo "  Already exists — skipping configuration."
 else
-  aws s3api create-bucket --bucket "${BUCKET_NAME}" --region "${REGION}" \
-    --create-bucket-configuration LocationConstraint="${REGION}" 2>/dev/null \
-    && echo "  Created" || echo "  Already exists"
+  if [ "${REGION}" = "us-east-1" ]; then
+    aws s3api create-bucket --bucket "${BUCKET_NAME}" --region "${REGION}"
+  else
+    aws s3api create-bucket --bucket "${BUCKET_NAME}" --region "${REGION}" \
+      --create-bucket-configuration LocationConstraint="${REGION}"
+  fi
+  aws s3api put-bucket-versioning \
+    --bucket "${BUCKET_NAME}" \
+    --versioning-configuration Status=Enabled
+  aws s3api put-bucket-encryption \
+    --bucket "${BUCKET_NAME}" \
+    --server-side-encryption-configuration \
+    '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+  aws s3api put-public-access-block \
+    --bucket "${BUCKET_NAME}" \
+    --public-access-block-configuration \
+    "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
+  echo "  Created and configured."
 fi
-
-aws s3api put-bucket-versioning \
-  --bucket "${BUCKET_NAME}" \
-  --versioning-configuration Status=Enabled
-
-aws s3api put-bucket-encryption \
-  --bucket "${BUCKET_NAME}" \
-  --server-side-encryption-configuration \
-  '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
-
-aws s3api put-public-access-block \
-  --bucket "${BUCKET_NAME}" \
-  --public-access-block-configuration \
-  "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
-
-echo "  S3 bucket ready."
 
 # ── 2. DynamoDB lock table ─────────────────────────────────────────────────────
 echo ""
