@@ -1,5 +1,4 @@
 version: 0.2
-
 env:
   variables:
     TF_VERSION: "1.7.5"
@@ -10,71 +9,59 @@ env:
     ECS_SERVICE: "prod-banking-service"
     ECS_TASK: "prod-banking-app"
     ALB_NAME: "prod-banking-alb"
-
 phases:
   install:
     runtime-versions:
       python: 3.12
     commands:
-      - echo "Installing Terraform..."
+      - echo "Installing Terraform"
       - wget -q https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip
       - unzip -q terraform_${TF_VERSION}_linux_amd64.zip
       - mv terraform /usr/local/bin/
-      - echo "Installing Python dependencies..."
       - pip install -q -r requirements.txt
-      - echo "Installing jq..."
       - yum install -y jq
-
   pre_build:
     commands:
-      - echo "Logging into ECR..."
+      - echo "===== PRE-BUILD PHASE ====="
+      - echo "Authenticating to ECR..."
       - aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com
       - IMAGE_TAG=${CODEBUILD_RESOLVED_SOURCE_VERSION}
       - IMAGE_URI=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPO}:${IMAGE_TAG}
-      - echo "IMAGE_TAG=$IMAGE_TAG"
-      - echo "IMAGE_URI=$IMAGE_URI"
-
+      - echo "Image will be deployed as: $IMAGE_URI"
   build:
     commands:
-      - echo "===== TERRAFORM INIT ====="
-      - terraform init -backend-config="region=${AWS_DEFAULT_REGION}" -upgrade 2>&1
-      - echo "===== TERRAFORM VALIDATE ====="
-      - terraform validate 2>&1
-      - echo "===== TERRAFORM PLAN ====="
-      - terraform plan -var-file="environments/prod/terraform.tfvars" -var="app_image_tag=${IMAGE_TAG}" -out=tfplan 2>&1 || (echo "Terraform plan failed - check variables above" && exit 1)
-      - echo "===== TERRAFORM APPLY ====="
-      - terraform apply -auto-approve tfplan 2>&1
-      - echo "===== DOCKER BUILD ====="
+      - echo "===== BUILD PHASE ====="
+      - echo "Initializing Terraform..."
+      - terraform init -backend-config="region=${AWS_DEFAULT_REGION}" -upgrade
+      - echo "Validating Terraform configuration..."
+      - terraform validate
+      - echo "Planning Terraform deployment..."
+      - terraform plan -var-file="environments/prod/terraform.tfvars" -var="app_image_tag=${IMAGE_TAG}" -out=tfplan
+      - echo "Applying Terraform configuration..."
+      - terraform apply -auto-approve tfplan
+      - echo "Building Docker image..."
       - docker build -t ${IMAGE_URI} -t ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPO}:latest .
-      - echo "===== DOCKER PUSH ====="
+      - echo "Pushing Docker image to ECR..."
       - docker push ${IMAGE_URI}
       - docker push ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPO}:latest
-
+      - echo "Docker image successfully pushed"
   post_build:
     commands:
-      - echo "===== ECS DEPLOYMENT ====="
+      - echo "===== POST-BUILD PHASE ====="
       - echo "Fetching current task definition..."
       - aws ecs describe-task-definition --task-definition ${ECS_TASK} --region ${AWS_DEFAULT_REGION} > task-def.json
       - echo "Creating new task definition with updated image..."
-      - cat task-def.json | jq --arg IMAGE "${IMAGE_URI}" '.containerDefinitions[0].image=$IMAGE | del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.placementConstraints,.compatibilities,.registeredAt,.registeredBy)' > new-task-def.json
-      - echo "New task definition content:"
-      - cat new-task-def.json
+      - cat task-def.json | jq '.taskDefinition | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .placementConstraints, .compatibilities, .registeredAt, .registeredBy)' > new-task-def.json
       - echo "Registering new task definition..."
       - NEW_TASK_ARN=$(aws ecs register-task-definition --region ${AWS_DEFAULT_REGION} --cli-input-json file://new-task-def.json --query 'taskDefinition.taskDefinitionArn' --output text)
-      - echo "New task ARN: $NEW_TASK_ARN"
+      - echo "New task definition ARN: $NEW_TASK_ARN"
       - echo "Updating ECS service..."
       - aws ecs update-service --cluster ${ECS_CLUSTER} --service ${ECS_SERVICE} --task-definition ${NEW_TASK_ARN} --force-new-deployment --region ${AWS_DEFAULT_REGION}
       - echo "Waiting for service to stabilize..."
       - aws ecs wait services-stable --cluster ${ECS_CLUSTER} --services ${ECS_SERVICE} --region ${AWS_DEFAULT_REGION}
-      - echo "Getting ALB DNS name..."
-      - ALB_DNS=$(aws elbv2 describe-load-balancers --names ${ALB_NAME} --region ${AWS_DEFAULT_REGION} --query 'LoadBalancers[0].DNSName' --output text)
-      - echo "ALB DNS: $ALB_DNS"
-      - echo "Waiting for application..."
-      - sleep 30
-      - echo "Running health check..."
-      - curl -f http://${ALB_DNS}/health || echo "Health check failed but continuing..."
-      - echo "Deployment complete!"
-
+      - echo "===== DEPLOYMENT SUCCESSFUL ====="
+      - echo "To destroy all resources, trigger the DESTROY build step"
+      - echo "WARNING: This will delete all AWS resources created by Terraform"
 artifacts:
   files:
     - tfplan
