@@ -43,6 +43,17 @@ provider "aws" {
   }
 }
 
+# Import pre-existing CloudWatch log groups that were created outside Terraform
+import {
+  to = module.codebuild.aws_cloudwatch_log_group.codebuild
+  id = "/codebuild/prod-banking"
+}
+
+import {
+  to = module.vpc.aws_cloudwatch_log_group.flow_logs
+  id = "/aws/vpc/prod-banking-flow-logs"
+}
+
 # ── VPC ──────────────────────────────────────────────────────────────────────
 module "vpc" {
   source = "./modules/vpc"
