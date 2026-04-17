@@ -116,13 +116,23 @@ resource "aws_iam_role_policy_attachment" "rds_monitoring" {
 }
 
 # ── Store DB Credentials in Secrets Manager ───────────────────────────────────
+resource "random_id" "secret_suffix" {
+  byte_length = 4
+  keepers = {
+    environment = var.environment
+  }
+}
+
 resource "aws_secretsmanager_secret" "db_credentials" {
-  name                    = "${var.environment}/banking-app/db-credentials"
+  name                    = "${var.environment}/banking-app/db-credentials-${random_id.secret_suffix.hex}"
   description             = "Banking app database credentials"
-  recovery_window_in_days = 30
+  recovery_window_in_days = 0
   kms_key_id              = aws_kms_key.rds.arn
 
-  tags = { Name = "${var.environment}-db-credentials" }
+  tags = { 
+    Name = "${var.environment}-db-credentials"
+    ManagedBy = "Terraform"
+  }
 }
 
 resource "aws_secretsmanager_secret_version" "db_credentials" {
