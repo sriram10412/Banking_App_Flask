@@ -37,3 +37,13 @@ output "db_secret_arn" {
   description = "ARN of the RDS credentials secret in Secrets Manager"
   value       = module.rds.db_secret_arn
 }
+
+output "codebuild_project_name" {
+  description = "CodeBuild project name"
+  value       = module.codebuild.project_name
+}
+
+output "codebuild_project_arn" {
+  description = "CodeBuild project ARN"
+  value       = module.codebuild.project_arn
+}

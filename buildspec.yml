@@ -3,8 +3,8 @@ version: 0.2
 env:
   variables:
     TF_VERSION: "1.7.5"
-    AWS_DEFAULT_REGION: "ap-southeast-1"
-    AWS_ACCOUNT_ID: "603196661038"
+    AWS_DEFAULT_REGION: "us-east-1"
+    AWS_ACCOUNT_ID: "842548752774"
     ECR_REPOSITORY_NAME: "prod-banking-app"
     ECS_CLUSTER_NAME: "prod-banking-cluster"
     ECS_SERVICE_NAME: "prod-banking-service"
@@ -16,15 +16,13 @@ phases:
     runtime-versions:
       python: 3.12
     commands:
-      - echo "Installing Terraform..."
+      - echo "Installing Terraform ${TF_VERSION}..."
       - wget -q https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip
       - unzip -q terraform_${TF_VERSION}_linux_amd64.zip
       - mv terraform /usr/local/bin/
       - terraform -version
-      - echo "Installing dependencies..."
       - pip install -q -r requirements.txt
-      - echo "Installing jq..."
-      - yum install -y jq > /dev/null 2>&1
+      - apt-get install -y -q jq 2>/dev/null || yum install -y jq >/dev/null 2>&1 || true
 
   pre_build:
     commands:
@@ -32,44 +30,36 @@ phases:
       - aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com
       - IMAGE_TAG=${CODEBUILD_RESOLVED_SOURCE_VERSION}
       - IMAGE_URI=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPOSITORY_NAME}:${IMAGE_TAG}
-      - echo "Image URI: $IMAGE_URI"
+      - echo "Image URI ${IMAGE_URI}"
 
   build:
     commands:
       - echo "Initializing Terraform..."
       - terraform init -backend-config="region=${AWS_DEFAULT_REGION}" -upgrade
-      - echo "Validating Terraform..."
       - terraform validate
-      - echo "Planning Terraform..."
       - terraform plan -var-file="environments/prod/terraform.tfvars" -var="app_image_tag=${IMAGE_TAG}" -out=tfplan
-      - echo "Applying Terraform..."
       - terraform apply -auto-approve tfplan
-      - echo "Building Docker image..."
+      - echo "Building and pushing Docker image..."
       - docker build -t ${IMAGE_URI} -t ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPOSITORY_NAME}:latest .
-      - echo "Pushing Docker image..."
       - docker push ${IMAGE_URI}
       - docker push ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPOSITORY_NAME}:latest
 
   post_build:
     commands:
-      - echo "Getting task definition..."
-      - TASK_DEF=$(aws ecs describe-task-definition --task-definition ${ECS_TASK_DEFINITION} --region ${AWS_DEFAULT_REGION} --output json)
-      - echo "Updating task definition..."
-      - NEW_TASK_DEF=$(echo $TASK_DEF | jq --arg IMAGE "${IMAGE_URI}" '.containerDefinitions[0].image=$IMAGE | del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.placementConstraints,.compatibilities,.registeredAt,.registeredBy)')
-      - echo "Registering new task definition..."
-      - NEW_TASK_ARN=$(echo "$NEW_TASK_DEF" | aws ecs register-task-definition --region ${AWS_DEFAULT_REGION} --cli-input-json file:///dev/stdin --query 'taskDefinition.taskDefinitionArn' --output text)
-      - echo "Updating ECS service..."
-      - aws ecs update-service --cluster ${ECS_CLUSTER_NAME} --service ${ECS_SERVICE_NAME} --task-definition ${NEW_TASK_ARN} --force-new-deployment --region ${AWS_DEFAULT_REGION}
-      - echo "Waiting for service stabilization..."
+      - echo "Updating ECS task definition..."
+      - |
+        TASK_DEF=$(aws ecs describe-task-definition --task-definition ${ECS_TASK_DEFINITION} --region ${AWS_DEFAULT_REGION} --output json)
+        NEW_TASK_DEF=$(echo $TASK_DEF | jq --arg IMAGE "$IMAGE_URI" '.taskDefinition | .containerDefinitions[0].image=$IMAGE | del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.placementConstraints,.compatibilities,.registeredAt,.registeredBy)')
+        NEW_TASK_ARN=$(echo "$NEW_TASK_DEF" | aws ecs register-task-definition --region ${AWS_DEFAULT_REGION} --cli-input-json file:///dev/stdin --query taskDefinition.taskDefinitionArn --output text)
+        echo "Registered $NEW_TASK_ARN"
+        aws ecs update-service --cluster ${ECS_CLUSTER_NAME} --service ${ECS_SERVICE_NAME} --task-definition $NEW_TASK_ARN --force-new-deployment --region ${AWS_DEFAULT_REGION}
+      - echo "Waiting for ECS service to stabilise..."
       - aws ecs wait services-stable --cluster ${ECS_CLUSTER_NAME} --services ${ECS_SERVICE_NAME} --region ${AWS_DEFAULT_REGION}
-      - echo "Getting ALB DNS..."
-      - ALB_DNS=$(aws elbv2 describe-load-balancers --names ${ALB_NAME} --region ${AWS_DEFAULT_REGION} --query 'LoadBalancers[0].DNSName' --output text)
-      - echo "ALB DNS: $ALB_DNS"
-      - echo "Waiting for app to be ready..."
-      - sleep 30
-      - echo "Running health check..."
-      - curl -f http://${ALB_DNS}/health
-      - echo "Deployment successful!"
+      - |
+        ALB_DNS=$(aws elbv2 describe-load-balancers --names ${ALB_NAME} --region ${AWS_DEFAULT_REGION} --query LoadBalancers[0].DNSName --output text)
+        echo "App is live at http://$ALB_DNS"
+        sleep 30
+        curl -f http://$ALB_DNS/health && echo "Health check passed!"
 
 artifacts:
   files:

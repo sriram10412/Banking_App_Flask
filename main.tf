@@ -15,9 +15,9 @@ terraform {
 
   # Remote state – update bucket/key/region before first run
   backend "s3" {
-    bucket         = "banking-app-tfstate"
+    bucket         = "bankingpromo1234"
     key            = "prod/terraform.tfstate"
-    region         = "ap-southeast-1"
+    region         = "us-east-1"
     encrypt        = true
     dynamodb_table = "banking-app-tfstate-lock"
   }
@@ -117,6 +117,20 @@ module "ecs" {
   cpu                   = var.ecs_cpu
   memory                = var.ecs_memory
   app_image_tag         = var.app_image_tag
+}
+
+# ── CodeBuild (CI/CD Pipeline) ───────────────────────────────────────────────
+module "codebuild" {
+  source = "./modules/codebuild"
+
+  environment            = var.environment
+  aws_region             = var.aws_region
+  aws_account_id         = var.aws_account_id
+  github_repo            = var.github_repo
+  github_branch          = var.github_branch
+  github_token            = var.github_token
+  db_password_secret_arn  = var.db_password_secret_arn
+  github_token_secret_arn = var.github_token_secret_arn
 }
 
 # ── Monitoring & Logging ─────────────────────────────────────────────────────

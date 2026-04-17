@@ -94,6 +94,33 @@ variable "app_image_tag" {
   default     = "latest"
 }
 
+# ── CodeBuild / CI ────────────────────────────────────────────────────────────
+variable "github_repo" {
+  description = "GitHub repository in owner/repo format (e.g. acme/my-app)"
+  type        = string
+}
+
+variable "github_branch" {
+  description = "Branch that triggers a CodeBuild run on push"
+  type        = string
+  default     = "main"
+}
+
+variable "github_token" {
+  description = "GitHub Personal Access Token (repo + admin:repo_hook scopes). Pass via TF_VAR_github_token."
+  type        = string
+  sensitive   = true
+}
+
+variable "db_password_secret_arn" {
+  description = "Secrets Manager secret ARN containing the DB master password (created by bootstrap.sh)"
+  type        = string
+}
+
+variable "github_token_secret_arn" {
+  description = "Secrets Manager secret ARN containing the GitHub PAT (created by bootstrap.sh)"
+  type        = string
+}
 
 
 ###############################################################################
