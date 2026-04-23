@@ -142,7 +142,9 @@ jobs:
               echo "  ✓ already in state: $addr"
             else
               echo "  → importing: $addr ($id)"
-              terraform import "$addr" "$id" 2>&1 || echo "  ⚠ skipped (may not exist yet): $addr"
+              terraform import \
+                -var-file="environments/prod/terraform.tfvars" \
+                "$addr" "$id" 2>&1 || echo "  ⚠ skipped (may not exist yet): $addr"
             fi
           }
 
