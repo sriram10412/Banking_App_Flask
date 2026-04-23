@@ -381,6 +381,8 @@ jobs:
             "${ENV}-banking-cluster"
           tf_import_if_missing "module.ecs.aws_ecs_service.app" \
             "${ENV}-banking-cluster/${ENV}-banking-service"
+          tf_import_if_missing "module.ecs.aws_appautoscaling_target.ecs" \
+            "ecs/service/${ENV}-banking-cluster/${ENV}-banking-service/ecs:service:DesiredCount"
 
           # ── Security Groups ───────────────────────────────────────────────
           if [ -n "$VPC_ID" ] && [ "$VPC_ID" != "None" ]; then
