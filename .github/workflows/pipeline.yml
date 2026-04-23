@@ -263,10 +263,39 @@ jobs:
           tf_import_if_missing "module.vpc.aws_cloudwatch_log_group.flow_logs" \
             "/aws/vpc/${ENV}-banking-flow-logs"
 
+          # ── CodeBuild ─────────────────────────────────────────────────────
+          tf_import_if_missing "module.codebuild.aws_codebuild_project.banking" \
+            "${ENV}-banking-codebuild"
+          tf_import_if_missing "module.codebuild.aws_codebuild_webhook.banking" \
+            "${ENV}-banking-codebuild"
+          CRED_ARN=$(aws codebuild list-source-credentials \
+            --region "$REGION" \
+            --query 'sourceCredentialsInfos[?serverType==`GITHUB`].arn' \
+            --output text 2>/dev/null)
+          [ -n "$CRED_ARN" ] && [ "$CRED_ARN" != "None" ] && \
+            tf_import_if_missing "module.codebuild.aws_codebuild_source_credential.github" "$CRED_ARN"
+
           # ── RDS ───────────────────────────────────────────────────────────
-          tf_import_if_missing "module.rds.aws_kms_alias.rds"          "alias/${ENV}-rds"
-          tf_import_if_missing "module.rds.aws_db_subnet_group.main"   "${ENV}-banking-db-subnet-group"
+          tf_import_if_missing "module.rds.aws_kms_alias.rds"           "alias/${ENV}-rds"
           tf_import_if_missing "module.rds.aws_db_parameter_group.main" "${ENV}-banking-pg14"
+
+          # Import RDS subnet group only if it belongs to the current VPC;
+          # if it references subnets from a destroyed VPC, delete it so
+          # Terraform can recreate it with the correct subnets.
+          SG_VPC=$(aws rds describe-db-subnet-groups \
+            --db-subnet-group-name "${ENV}-banking-db-subnet-group" \
+            --region "$REGION" \
+            --query 'DBSubnetGroups[0].VpcId' --output text 2>/dev/null)
+          if [ -n "$SG_VPC" ] && [ "$SG_VPC" != "None" ]; then
+            if [ "$SG_VPC" = "$VPC_ID" ]; then
+              tf_import_if_missing "module.rds.aws_db_subnet_group.main" "${ENV}-banking-db-subnet-group"
+            else
+              echo "  ⚠ RDS subnet group is in stale VPC ($SG_VPC), deleting so Terraform recreates it..."
+              aws rds delete-db-subnet-group \
+                --db-subnet-group-name "${ENV}-banking-db-subnet-group" \
+                --region "$REGION" 2>&1 || echo "  ⚠ could not delete subnet group (RDS instance may still reference it)"
+            fi
+          fi
 
           # ── Security Groups ───────────────────────────────────────────────
           if [ -n "$VPC_ID" ] && [ "$VPC_ID" != "None" ]; then
