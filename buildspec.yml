@@ -33,24 +33,19 @@ phases:
 
   build:
     commands:
-      - echo "Clearing stale Terraform state checksum from DynamoDB if present..."
+      - echo "Diagnosing and clearing stale Terraform state checksum..."
       - |
-        LOCK_ID="banking-app-tfstate/prod/terraform.tfstate-md5"
-        ITEM=$(aws dynamodb get-item \
+        echo "=== DynamoDB table contents ==="
+        aws dynamodb scan --table-name banking-app-tfstate-lock --region ${AWS_DEFAULT_REGION} --output json
+        echo "=== S3 state file ==="
+        aws s3 ls s3://banking-app-tfstate/prod/terraform.tfstate --region ${AWS_DEFAULT_REGION} || echo "S3 state file not found"
+        echo "=== Force-deleting md5 Digest entry ==="
+        aws dynamodb delete-item \
           --table-name banking-app-tfstate-lock \
-          --key "{\"LockID\": {\"S\": \"${LOCK_ID}\"}}" \
-          --region ${AWS_DEFAULT_REGION} \
-          --query 'Item' --output text 2>/dev/null)
-        if [ -n "$ITEM" ]; then
-          echo "Stale Digest entry found — removing from DynamoDB..."
-          aws dynamodb delete-item \
-            --table-name banking-app-tfstate-lock \
-            --key "{\"LockID\": {\"S\": \"${LOCK_ID}\"}}" \
-            --region ${AWS_DEFAULT_REGION}
-          echo "Done."
-        else
-          echo "No stale Digest entry found, skipping."
-        fi
+          --key '{"LockID": {"S": "banking-app-tfstate/prod/terraform.tfstate-md5"}}' \
+          --region ${AWS_DEFAULT_REGION} && echo "Deleted md5 entry." || echo "md5 entry not found (ok)."
+        echo "=== Remaining DynamoDB items ==="
+        aws dynamodb scan --table-name banking-app-tfstate-lock --region ${AWS_DEFAULT_REGION} --output json
       - echo "Initializing Terraform..."
       - terraform init -backend-config="region=${AWS_DEFAULT_REGION}" -upgrade
       - terraform validate
