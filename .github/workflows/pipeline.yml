@@ -239,21 +239,51 @@ jobs:
           tf_import_if_missing "module.alb.aws_s3_bucket.alb_logs" \
             "${ENV}-banking-alb-logs-${ACCOUNT_ID}"
 
-          # ── ALB Target Group ──────────────────────────────────────────────
+          # ── ALB Target Group (VPC-aware) ──────────────────────────────────
           TG_ARN=$(aws elbv2 describe-target-groups \
             --names "${ENV}-banking-tg" \
             --region "$REGION" \
             --query 'TargetGroups[0].TargetGroupArn' --output text 2>/dev/null)
-          [ -n "$TG_ARN" ] && [ "$TG_ARN" != "None" ] && \
-            tf_import_if_missing "module.alb.aws_lb_target_group.app" "$TG_ARN"
+          if [ -n "$TG_ARN" ] && [ "$TG_ARN" != "None" ]; then
+            TG_VPC=$(aws elbv2 describe-target-groups \
+              --target-group-arns "$TG_ARN" \
+              --region "$REGION" \
+              --query 'TargetGroups[0].VpcId' --output text 2>/dev/null)
+            if [ "$TG_VPC" = "$VPC_ID" ]; then
+              tf_import_if_missing "module.alb.aws_lb_target_group.app" "$TG_ARN"
+            else
+              echo "  ⚠ Target group is in stale VPC ($TG_VPC), removing listeners and deleting it..."
+              aws elbv2 describe-listeners \
+                --region "$REGION" \
+                --query "Listeners[?contains(DefaultActions[].TargetGroupArn, '$TG_ARN')].ListenerArn" \
+                --output text 2>/dev/null | tr '\t' '\n' | while read -r L_ARN; do
+                  [ -n "$L_ARN" ] && aws elbv2 delete-listener \
+                    --listener-arn "$L_ARN" --region "$REGION" 2>/dev/null && \
+                    echo "  ✓ deleted listener: $L_ARN"
+              done
+              aws elbv2 delete-target-group \
+                --target-group-arn "$TG_ARN" --region "$REGION" 2>&1 && \
+                echo "  ✓ deleted stale target group" || \
+                echo "  ⚠ could not delete target group"
+            fi
+          fi
 
-          # ── ALB ───────────────────────────────────────────────────────────
+          # ── ALB (VPC-aware) ───────────────────────────────────────────────
           ALB_ARN=$(aws elbv2 describe-load-balancers \
             --names "${ENV}-banking-alb" \
             --region "$REGION" \
             --query 'LoadBalancers[0].LoadBalancerArn' --output text 2>/dev/null)
-          [ -n "$ALB_ARN" ] && [ "$ALB_ARN" != "None" ] && \
-            tf_import_if_missing "module.alb.aws_lb.main" "$ALB_ARN"
+          if [ -n "$ALB_ARN" ] && [ "$ALB_ARN" != "None" ]; then
+            ALB_VPC=$(aws elbv2 describe-load-balancers \
+              --load-balancer-arns "$ALB_ARN" \
+              --region "$REGION" \
+              --query 'LoadBalancers[0].VpcId' --output text 2>/dev/null)
+            if [ "$ALB_VPC" = "$VPC_ID" ]; then
+              tf_import_if_missing "module.alb.aws_lb.main" "$ALB_ARN"
+            else
+              echo "  ⚠ ALB is in stale VPC ($ALB_VPC), skipping import (Terraform will recreate it)"
+            fi
+          fi
 
           # ── CloudWatch Log Groups ─────────────────────────────────────────
           tf_import_if_missing "module.monitoring.aws_cloudwatch_log_group.app" \
