@@ -33,6 +33,24 @@ phases:
 
   build:
     commands:
+      - echo "Clearing stale Terraform state checksum from DynamoDB if present..."
+      - |
+        LOCK_ID="banking-app-tfstate/prod/terraform.tfstate-md5"
+        ITEM=$(aws dynamodb get-item \
+          --table-name banking-app-tfstate-lock \
+          --key "{\"LockID\": {\"S\": \"${LOCK_ID}\"}}" \
+          --region ${AWS_DEFAULT_REGION} \
+          --query 'Item' --output text 2>/dev/null)
+        if [ -n "$ITEM" ]; then
+          echo "Stale Digest entry found — removing from DynamoDB..."
+          aws dynamodb delete-item \
+            --table-name banking-app-tfstate-lock \
+            --key "{\"LockID\": {\"S\": \"${LOCK_ID}\"}}" \
+            --region ${AWS_DEFAULT_REGION}
+          echo "Done."
+        else
+          echo "No stale Digest entry found, skipping."
+        fi
       - echo "Initializing Terraform..."
       - terraform init -backend-config="region=${AWS_DEFAULT_REGION}" -upgrade
       - terraform validate
