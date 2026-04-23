@@ -126,11 +126,170 @@ jobs:
           terraform init \
             -backend-config="region=${{ secrets.AWS_DEFAULT_REGION }}"
 
+      - name: Reconcile Terraform state with existing AWS resources
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+        run: |
+          set +e  # don't abort on individual import failures
+          ENV="prod"
+          REGION="${AWS_DEFAULT_REGION}"
+          ACCOUNT_ID="${AWS_ACCOUNT_ID}"
+
+          tf_import_if_missing() {
+            local addr="$1" id="$2"
+            if terraform state show "$addr" &>/dev/null; then
+              echo "  ✓ already in state: $addr"
+            else
+              echo "  → importing: $addr ($id)"
+              terraform import "$addr" "$id" 2>&1 || echo "  ⚠ skipped (may not exist yet): $addr"
+            fi
+          }
+
+          echo "=== Reconciling Terraform state ==="
+
+          # ── VPC & networking ──────────────────────────────────────────────
+          VPC_ID=$(aws ec2 describe-vpcs \
+            --filters "Name=tag:Name,Values=${ENV}-banking-vpc" \
+            --region "$REGION" \
+            --query 'Vpcs[0].VpcId' --output text 2>/dev/null)
+          if [ -n "$VPC_ID" ] && [ "$VPC_ID" != "None" ]; then
+            tf_import_if_missing "module.vpc.aws_vpc.main" "$VPC_ID"
+
+            IGW_ID=$(aws ec2 describe-internet-gateways \
+              --filters "Name=attachment.vpc-id,Values=$VPC_ID" \
+              --region "$REGION" \
+              --query 'InternetGateways[0].InternetGatewayId' --output text 2>/dev/null)
+            [ -n "$IGW_ID" ] && [ "$IGW_ID" != "None" ] && \
+              tf_import_if_missing "module.vpc.aws_internet_gateway.main" "$IGW_ID"
+
+            # Public subnets
+            PUBLIC_CIDRS=("10.0.1.0/24" "10.0.2.0/24" "10.0.3.0/24")
+            for i in 0 1 2; do
+              SN_ID=$(aws ec2 describe-subnets \
+                --filters "Name=vpc-id,Values=$VPC_ID" "Name=cidrBlock,Values=${PUBLIC_CIDRS[$i]}" \
+                --region "$REGION" \
+                --query 'Subnets[0].SubnetId' --output text 2>/dev/null)
+              [ -n "$SN_ID" ] && [ "$SN_ID" != "None" ] && \
+                tf_import_if_missing "module.vpc.aws_subnet.public[$i]" "$SN_ID"
+            done
+
+            # Private subnets
+            PRIVATE_CIDRS=("10.0.11.0/24" "10.0.12.0/24" "10.0.13.0/24")
+            for i in 0 1 2; do
+              SN_ID=$(aws ec2 describe-subnets \
+                --filters "Name=vpc-id,Values=$VPC_ID" "Name=cidrBlock,Values=${PRIVATE_CIDRS[$i]}" \
+                --region "$REGION" \
+                --query 'Subnets[0].SubnetId' --output text 2>/dev/null)
+              [ -n "$SN_ID" ] && [ "$SN_ID" != "None" ] && \
+                tf_import_if_missing "module.vpc.aws_subnet.private[$i]" "$SN_ID"
+            done
+
+            # NAT EIP
+            EIP_ALLOC=$(aws ec2 describe-addresses \
+              --filters "Name=tag:Name,Values=${ENV}-nat-eip-1" \
+              --region "$REGION" \
+              --query 'Addresses[0].AllocationId' --output text 2>/dev/null)
+            [ -n "$EIP_ALLOC" ] && [ "$EIP_ALLOC" != "None" ] && \
+              tf_import_if_missing "module.vpc.aws_eip.nat[0]" "$EIP_ALLOC"
+
+            # NAT Gateway
+            NGW_ID=$(aws ec2 describe-nat-gateways \
+              --filter "Name=vpc-id,Values=$VPC_ID" "Name=state,Values=available" \
+              --region "$REGION" \
+              --query 'NatGateways[0].NatGatewayId' --output text 2>/dev/null)
+            [ -n "$NGW_ID" ] && [ "$NGW_ID" != "None" ] && \
+              tf_import_if_missing "module.vpc.aws_nat_gateway.main[0]" "$NGW_ID"
+
+            # Route tables
+            PUB_RT=$(aws ec2 describe-route-tables \
+              --filters "Name=vpc-id,Values=$VPC_ID" "Name=tag:Name,Values=${ENV}-public-rt" \
+              --region "$REGION" \
+              --query 'RouteTables[0].RouteTableId' --output text 2>/dev/null)
+            [ -n "$PUB_RT" ] && [ "$PUB_RT" != "None" ] && \
+              tf_import_if_missing "module.vpc.aws_route_table.public" "$PUB_RT"
+          fi
+
+          # ── IAM roles ─────────────────────────────────────────────────────
+          tf_import_if_missing "module.vpc.aws_iam_role.flow_logs"              "${ENV}-vpc-flow-logs-role"
+          tf_import_if_missing "module.codebuild.aws_iam_role.codebuild"        "${ENV}-banking-codebuild-role"
+          tf_import_if_missing "module.iam.aws_iam_role.ecs_task_execution"     "${ENV}-ecs-task-execution-role"
+          tf_import_if_missing "module.iam.aws_iam_role.ecs_task"               "${ENV}-ecs-task-role"
+          tf_import_if_missing "module.rds.aws_iam_role.rds_monitoring"         "${ENV}-rds-monitoring-role"
+
+          # ── IAM policies (need ARN) ────────────────────────────────────────
+          for pair in \
+            "module.iam.aws_iam_policy.ecs_secrets:${ENV}-ecs-secrets-policy" \
+            "module.iam.aws_iam_policy.ecs_task_app:${ENV}-ecs-task-app-policy"; do
+            ADDR="${pair%%:*}"
+            POLICY_NAME="${pair##*:}"
+            POLICY_ARN=$(aws iam list-policies --scope Local \
+              --query "Policies[?PolicyName=='${POLICY_NAME}'].Arn" \
+              --output text 2>/dev/null)
+            [ -n "$POLICY_ARN" ] && [ "$POLICY_ARN" != "None" ] && \
+              tf_import_if_missing "$ADDR" "$POLICY_ARN"
+          done
+
+          # ── ECR ───────────────────────────────────────────────────────────
+          tf_import_if_missing "module.ecr.aws_ecr_repository.app" "${ENV}-banking-app"
+
+          # ── S3 ALB logs bucket ────────────────────────────────────────────
+          tf_import_if_missing "module.alb.aws_s3_bucket.alb_logs" \
+            "${ENV}-banking-alb-logs-${ACCOUNT_ID}"
+
+          # ── ALB Target Group ──────────────────────────────────────────────
+          TG_ARN=$(aws elbv2 describe-target-groups \
+            --names "${ENV}-banking-tg" \
+            --region "$REGION" \
+            --query 'TargetGroups[0].TargetGroupArn' --output text 2>/dev/null)
+          [ -n "$TG_ARN" ] && [ "$TG_ARN" != "None" ] && \
+            tf_import_if_missing "module.alb.aws_lb_target_group.app" "$TG_ARN"
+
+          # ── ALB ───────────────────────────────────────────────────────────
+          ALB_ARN=$(aws elbv2 describe-load-balancers \
+            --names "${ENV}-banking-alb" \
+            --region "$REGION" \
+            --query 'LoadBalancers[0].LoadBalancerArn' --output text 2>/dev/null)
+          [ -n "$ALB_ARN" ] && [ "$ALB_ARN" != "None" ] && \
+            tf_import_if_missing "module.alb.aws_lb.main" "$ALB_ARN"
+
+          # ── CloudWatch Log Groups ─────────────────────────────────────────
+          tf_import_if_missing "module.monitoring.aws_cloudwatch_log_group.app" \
+            "/ecs/${ENV}/banking-app"
+          tf_import_if_missing "module.codebuild.aws_cloudwatch_log_group.codebuild" \
+            "/codebuild/${ENV}-banking"
+          tf_import_if_missing "module.vpc.aws_cloudwatch_log_group.flow_logs" \
+            "/aws/vpc/${ENV}-banking-flow-logs"
+
+          # ── RDS ───────────────────────────────────────────────────────────
+          tf_import_if_missing "module.rds.aws_kms_alias.rds"          "alias/${ENV}-rds"
+          tf_import_if_missing "module.rds.aws_db_subnet_group.main"   "${ENV}-banking-db-subnet-group"
+          tf_import_if_missing "module.rds.aws_db_parameter_group.main" "${ENV}-banking-pg14"
+
+          # ── Security Groups ───────────────────────────────────────────────
+          if [ -n "$VPC_ID" ] && [ "$VPC_ID" != "None" ]; then
+            for pair in \
+              "module.security.aws_security_group.alb:${ENV}-alb-sg" \
+              "module.security.aws_security_group.ecs:${ENV}-ecs-sg" \
+              "module.security.aws_security_group.rds:${ENV}-rds-sg"; do
+              ADDR="${pair%%:*}"
+              SG_NAME="${pair##*:}"
+              SG_ID=$(aws ec2 describe-security-groups \
+                --filters "Name=vpc-id,Values=$VPC_ID" "Name=group-name,Values=$SG_NAME" \
+                --region "$REGION" \
+                --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null)
+              [ -n "$SG_ID" ] && [ "$SG_ID" != "None" ] && \
+                tf_import_if_missing "$ADDR" "$SG_ID"
+            done
+          fi
+
+          echo "=== State reconciliation complete ==="
+
       - name: Terraform Format Check
         run: terraform fmt -check -recursive
 
       - name: Terraform Validate
-        run: terraform validate 
+        run: terraform validate
 
       - name: Terraform Plan
         id: plan
