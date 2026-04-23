@@ -239,51 +239,47 @@ jobs:
           tf_import_if_missing "module.alb.aws_s3_bucket.alb_logs" \
             "${ENV}-banking-alb-logs-${ACCOUNT_ID}"
 
-          # ── ALB Target Group (VPC-aware) ──────────────────────────────────
-          TG_ARN=$(aws elbv2 describe-target-groups \
-            --names "${ENV}-banking-tg" \
-            --region "$REGION" \
-            --query 'TargetGroups[0].TargetGroupArn' --output text 2>/dev/null)
-          if [ -n "$TG_ARN" ] && [ "$TG_ARN" != "None" ]; then
-            TG_VPC=$(aws elbv2 describe-target-groups \
-              --target-group-arns "$TG_ARN" \
+          # ── ALB Target Group ──────────────────────────────────────────────
+          # If not in state but exists in AWS → delete it (and its listeners)
+          # so Terraform can recreate it cleanly in the current VPC.
+          if terraform state show "module.alb.aws_lb_target_group.app" &>/dev/null; then
+            echo "  ✓ already in state: module.alb.aws_lb_target_group.app"
+          else
+            TG_ARN=$(aws elbv2 describe-target-groups \
+              --names "${ENV}-banking-tg" \
               --region "$REGION" \
-              --query 'TargetGroups[0].VpcId' --output text 2>/dev/null)
-            if [ "$TG_VPC" = "$VPC_ID" ]; then
-              tf_import_if_missing "module.alb.aws_lb_target_group.app" "$TG_ARN"
-            else
-              echo "  ⚠ Target group is in stale VPC ($TG_VPC), removing listeners and deleting it..."
-              aws elbv2 describe-listeners \
+              --query 'TargetGroups[0].TargetGroupArn' --output text 2>/dev/null)
+            if [ -n "$TG_ARN" ] && [ "$TG_ARN" != "None" ]; then
+              echo "  → TG not in state but exists in AWS — deleting stale resource..."
+              ALB_ARN_TMP=$(aws elbv2 describe-load-balancers \
+                --names "${ENV}-banking-alb" \
                 --region "$REGION" \
-                --query "Listeners[?contains(DefaultActions[].TargetGroupArn, '$TG_ARN')].ListenerArn" \
-                --output text 2>/dev/null | tr '\t' '\n' | while read -r L_ARN; do
+                --query 'LoadBalancers[0].LoadBalancerArn' --output text 2>/dev/null)
+              if [ -n "$ALB_ARN_TMP" ] && [ "$ALB_ARN_TMP" != "None" ]; then
+                while IFS= read -r L_ARN; do
                   [ -n "$L_ARN" ] && aws elbv2 delete-listener \
-                    --listener-arn "$L_ARN" --region "$REGION" 2>/dev/null && \
-                    echo "  ✓ deleted listener: $L_ARN"
-              done
+                    --listener-arn "$L_ARN" --region "$REGION" 2>/dev/null \
+                    && echo "  ✓ deleted listener $L_ARN"
+                done < <(aws elbv2 describe-listeners \
+                  --load-balancer-arn "$ALB_ARN_TMP" \
+                  --region "$REGION" \
+                  --query 'Listeners[*].ListenerArn' --output text 2>/dev/null \
+                  | tr '\t' '\n')
+              fi
               aws elbv2 delete-target-group \
-                --target-group-arn "$TG_ARN" --region "$REGION" 2>&1 && \
-                echo "  ✓ deleted stale target group" || \
-                echo "  ⚠ could not delete target group"
+                --target-group-arn "$TG_ARN" --region "$REGION" \
+                && echo "  ✓ deleted stale target group" \
+                || echo "  ⚠ TG deletion failed — manual cleanup may be needed"
             fi
           fi
 
-          # ── ALB (VPC-aware) ───────────────────────────────────────────────
+          # ── ALB ───────────────────────────────────────────────────────────
           ALB_ARN=$(aws elbv2 describe-load-balancers \
             --names "${ENV}-banking-alb" \
             --region "$REGION" \
             --query 'LoadBalancers[0].LoadBalancerArn' --output text 2>/dev/null)
-          if [ -n "$ALB_ARN" ] && [ "$ALB_ARN" != "None" ]; then
-            ALB_VPC=$(aws elbv2 describe-load-balancers \
-              --load-balancer-arns "$ALB_ARN" \
-              --region "$REGION" \
-              --query 'LoadBalancers[0].VpcId' --output text 2>/dev/null)
-            if [ "$ALB_VPC" = "$VPC_ID" ]; then
-              tf_import_if_missing "module.alb.aws_lb.main" "$ALB_ARN"
-            else
-              echo "  ⚠ ALB is in stale VPC ($ALB_VPC), skipping import (Terraform will recreate it)"
-            fi
-          fi
+          [ -n "$ALB_ARN" ] && [ "$ALB_ARN" != "None" ] && \
+            tf_import_if_missing "module.alb.aws_lb.main" "$ALB_ARN"
 
           # ── CloudWatch Log Groups ─────────────────────────────────────────
           tf_import_if_missing "module.monitoring.aws_cloudwatch_log_group.app" \
@@ -309,21 +305,33 @@ jobs:
           tf_import_if_missing "module.rds.aws_kms_alias.rds"           "alias/${ENV}-rds"
           tf_import_if_missing "module.rds.aws_db_parameter_group.main" "${ENV}-banking-pg14"
 
-          # Import RDS subnet group only if it belongs to the current VPC;
-          # if it references subnets from a destroyed VPC, delete it so
-          # Terraform can recreate it with the correct subnets.
-          SG_VPC=$(aws rds describe-db-subnet-groups \
-            --db-subnet-group-name "${ENV}-banking-db-subnet-group" \
-            --region "$REGION" \
-            --query 'DBSubnetGroups[0].VpcId' --output text 2>/dev/null)
-          if [ -n "$SG_VPC" ] && [ "$SG_VPC" != "None" ]; then
-            if [ "$SG_VPC" = "$VPC_ID" ]; then
-              tf_import_if_missing "module.rds.aws_db_subnet_group.main" "${ENV}-banking-db-subnet-group"
-            else
-              echo "  ⚠ RDS subnet group is in stale VPC ($SG_VPC), deleting so Terraform recreates it..."
-              aws rds delete-db-subnet-group \
-                --db-subnet-group-name "${ENV}-banking-db-subnet-group" \
-                --region "$REGION" 2>&1 || echo "  ⚠ could not delete subnet group (RDS instance may still reference it)"
+          # RDS subnet group: if not in state but exists in AWS, delete it so
+          # Terraform recreates it against the current VPC's subnets.
+          # Exception: if an RDS instance is actively using it, import instead
+          # (we cannot delete a subnet group that is in use).
+          if terraform state show "module.rds.aws_db_subnet_group.main" &>/dev/null; then
+            echo "  ✓ already in state: module.rds.aws_db_subnet_group.main"
+          else
+            SG_EXISTS=$(aws rds describe-db-subnet-groups \
+              --db-subnet-group-name "${ENV}-banking-db-subnet-group" \
+              --region "$REGION" \
+              --query 'DBSubnetGroups[0].DBSubnetGroupName' --output text 2>/dev/null)
+            if [ -n "$SG_EXISTS" ] && [ "$SG_EXISTS" != "None" ]; then
+              RDS_USING=$(aws rds describe-db-instances \
+                --region "$REGION" \
+                --query "DBInstances[?DBSubnetGroup.DBSubnetGroupName=='${ENV}-banking-db-subnet-group'].DBInstanceIdentifier" \
+                --output text 2>/dev/null)
+              if [ -z "$RDS_USING" ] || [ "$RDS_USING" = "None" ]; then
+                echo "  → RDS subnet group not in state — deleting stale resource..."
+                aws rds delete-db-subnet-group \
+                  --db-subnet-group-name "${ENV}-banking-db-subnet-group" \
+                  --region "$REGION" \
+                  && echo "  ✓ deleted stale RDS subnet group" \
+                  || echo "  ⚠ deletion failed — manual cleanup may be needed"
+              else
+                echo "  → RDS instance '$RDS_USING' is using subnet group — importing..."
+                tf_import_if_missing "module.rds.aws_db_subnet_group.main" "${ENV}-banking-db-subnet-group"
+              fi
             fi
           fi
 
