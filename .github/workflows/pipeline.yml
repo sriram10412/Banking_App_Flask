@@ -1,7 +1,11 @@
 ###############################################################################
-# .github/workflows/pipeline.yml  –  Bootstrap + Destroy
+# .github/workflows/pipeline.yml  –  Bootstrap only (Option 2)
 #
-# Required GitHub Secrets:
+# This workflow ONLY creates AWS infrastructure via Terraform.
+# After the CodeBuild project is created, GitHub webhook will automatically
+# trigger builds on every push/PR. No manual start-build call needed.
+#
+# Required GitHub Secrets (Settings -> Secrets and variables -> Actions):
 #   AWS_ACCESS_KEY_ID       - IAM user access key
 #   AWS_SECRET_ACCESS_KEY   - IAM user secret key
 #   AWS_ACCOUNT_ID          - 603196661038
@@ -26,7 +30,62 @@ env:
   TF_VERSION: "1.7.5"
 
 jobs:
-  # ── Bootstrap ────────────────────────────────────────────────────────────────
+  approve-destroy:
+    name: Wait for Destroy Approval
+    runs-on: ubuntu-latest
+    needs: bootstrap
+    steps:
+      - name: Request manual approval
+        uses: trstringer/manual-approval@v1
+        with:
+          secret: ${{ secrets.GITHUB_TOKEN }}
+          approvers: sriram10412
+          minimum-approvals: 1
+          issue-title: "Approve Terraform Destroy for prod infrastructure"
+          issue-body: |
+            Bootstrap job has completed. Review and approve to destroy all AWS infrastructure.
+            **Approve** by commenting: `approved`
+            **Deny** by commenting: `denied`
+          exclude-workflow-initiator-as-approver: false
+
+  destroy:
+    name: Terraform Destroy
+    runs-on: ubuntu-latest
+    needs: approve-destroy
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_DEFAULT_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        run: |
+          terraform init \
+            -backend-config="region=${{ secrets.AWS_DEFAULT_REGION }}"
+
+      - name: Release stale Terraform state lock 
+        run: |
+          aws dynamodb delete-item \
+            --table-name banking-app-tfstate-lock \
+            --key '{"LockID": {"S": "banking-app-tfstate/prod/terraform.tfstate"}}' \
+            --region ${{ secrets.AWS_DEFAULT_REGION }} || true
+
+      - name: Terraform Destroy
+        run: |
+          terraform destroy \
+            -var-file="environments/prod/terraform.tfvars" \
+            -auto-approve
+
   bootstrap:
     name: Bootstrap AWS Resources
     runs-on: ubuntu-latest
@@ -67,6 +126,283 @@ jobs:
           terraform init \
             -backend-config="region=${{ secrets.AWS_DEFAULT_REGION }}"
 
+      - name: Reconcile Terraform state with existing AWS resources
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+        run: |
+          set +e  # don't abort on individual import failures
+          ENV="prod"
+          REGION="${AWS_DEFAULT_REGION}"
+          ACCOUNT_ID="${AWS_ACCOUNT_ID}"
+
+          tf_import_if_missing() {
+            local addr="$1" id="$2"
+            if terraform state show "$addr" &>/dev/null; then
+              echo "  ✓ already in state: $addr"
+            else
+              echo "  → importing: $addr ($id)"
+              terraform import \
+                -var-file="environments/prod/terraform.tfvars" \
+                "$addr" "$id" 2>&1 || echo "  ⚠ skipped (may not exist yet): $addr"
+            fi
+          }
+
+          echo "=== Reconciling Terraform state ==="
+
+          # ── VPC & networking ──────────────────────────────────────────────
+          VPC_ID=$(aws ec2 describe-vpcs \
+            --filters "Name=tag:Name,Values=${ENV}-banking-vpc" \
+            --region "$REGION" \
+            --query 'Vpcs[0].VpcId' --output text 2>/dev/null)
+          if [ -n "$VPC_ID" ] && [ "$VPC_ID" != "None" ]; then
+            tf_import_if_missing "module.vpc.aws_vpc.main" "$VPC_ID"
+
+            IGW_ID=$(aws ec2 describe-internet-gateways \
+              --filters "Name=attachment.vpc-id,Values=$VPC_ID" \
+              --region "$REGION" \
+              --query 'InternetGateways[0].InternetGatewayId' --output text 2>/dev/null)
+            [ -n "$IGW_ID" ] && [ "$IGW_ID" != "None" ] && \
+              tf_import_if_missing "module.vpc.aws_internet_gateway.main" "$IGW_ID"
+
+            # Public subnets
+            PUBLIC_CIDRS=("10.0.1.0/24" "10.0.2.0/24" "10.0.3.0/24")
+            for i in 0 1 2; do
+              SN_ID=$(aws ec2 describe-subnets \
+                --filters "Name=vpc-id,Values=$VPC_ID" "Name=cidrBlock,Values=${PUBLIC_CIDRS[$i]}" \
+                --region "$REGION" \
+                --query 'Subnets[0].SubnetId' --output text 2>/dev/null)
+              [ -n "$SN_ID" ] && [ "$SN_ID" != "None" ] && \
+                tf_import_if_missing "module.vpc.aws_subnet.public[$i]" "$SN_ID"
+            done
+
+            # Private subnets
+            PRIVATE_CIDRS=("10.0.11.0/24" "10.0.12.0/24" "10.0.13.0/24")
+            for i in 0 1 2; do
+              SN_ID=$(aws ec2 describe-subnets \
+                --filters "Name=vpc-id,Values=$VPC_ID" "Name=cidrBlock,Values=${PRIVATE_CIDRS[$i]}" \
+                --region "$REGION" \
+                --query 'Subnets[0].SubnetId' --output text 2>/dev/null)
+              [ -n "$SN_ID" ] && [ "$SN_ID" != "None" ] && \
+                tf_import_if_missing "module.vpc.aws_subnet.private[$i]" "$SN_ID"
+            done
+
+            # NAT EIP
+            EIP_ALLOC=$(aws ec2 describe-addresses \
+              --filters "Name=tag:Name,Values=${ENV}-nat-eip-1" \
+              --region "$REGION" \
+              --query 'Addresses[0].AllocationId' --output text 2>/dev/null)
+            [ -n "$EIP_ALLOC" ] && [ "$EIP_ALLOC" != "None" ] && \
+              tf_import_if_missing "module.vpc.aws_eip.nat[0]" "$EIP_ALLOC"
+
+            # NAT Gateway
+            NGW_ID=$(aws ec2 describe-nat-gateways \
+              --filter "Name=vpc-id,Values=$VPC_ID" "Name=state,Values=available" \
+              --region "$REGION" \
+              --query 'NatGateways[0].NatGatewayId' --output text 2>/dev/null)
+            [ -n "$NGW_ID" ] && [ "$NGW_ID" != "None" ] && \
+              tf_import_if_missing "module.vpc.aws_nat_gateway.main[0]" "$NGW_ID"
+
+            # Route tables
+            PUB_RT=$(aws ec2 describe-route-tables \
+              --filters "Name=vpc-id,Values=$VPC_ID" "Name=tag:Name,Values=${ENV}-public-rt" \
+              --region "$REGION" \
+              --query 'RouteTables[0].RouteTableId' --output text 2>/dev/null)
+            [ -n "$PUB_RT" ] && [ "$PUB_RT" != "None" ] && \
+              tf_import_if_missing "module.vpc.aws_route_table.public" "$PUB_RT"
+          fi
+
+          # ── IAM roles ─────────────────────────────────────────────────────
+          tf_import_if_missing "module.vpc.aws_iam_role.flow_logs"              "${ENV}-vpc-flow-logs-role"
+          tf_import_if_missing "module.codebuild.aws_iam_role.codebuild"        "${ENV}-banking-codebuild-role"
+          tf_import_if_missing "module.iam.aws_iam_role.ecs_task_execution"     "${ENV}-ecs-task-execution-role"
+          tf_import_if_missing "module.iam.aws_iam_role.ecs_task"               "${ENV}-ecs-task-role"
+          tf_import_if_missing "module.rds.aws_iam_role.rds_monitoring"         "${ENV}-rds-monitoring-role"
+
+          # ── IAM policies (need ARN) ────────────────────────────────────────
+          for pair in \
+            "module.iam.aws_iam_policy.ecs_secrets:${ENV}-ecs-secrets-policy" \
+            "module.iam.aws_iam_policy.ecs_task_app:${ENV}-ecs-task-app-policy"; do
+            ADDR="${pair%%:*}"
+            POLICY_NAME="${pair##*:}"
+            POLICY_ARN=$(aws iam list-policies --scope Local \
+              --query "Policies[?PolicyName=='${POLICY_NAME}'].Arn" \
+              --output text 2>/dev/null)
+            [ -n "$POLICY_ARN" ] && [ "$POLICY_ARN" != "None" ] && \
+              tf_import_if_missing "$ADDR" "$POLICY_ARN"
+          done
+
+          # ── ECR ───────────────────────────────────────────────────────────
+          tf_import_if_missing "module.ecr.aws_ecr_repository.app" "${ENV}-banking-app"
+
+          # ── S3 ALB logs bucket ────────────────────────────────────────────
+          tf_import_if_missing "module.alb.aws_s3_bucket.alb_logs" \
+            "${ENV}-banking-alb-logs-${ACCOUNT_ID}"
+
+          # ── ALB Target Group ──────────────────────────────────────────────
+          # Always check VPC — whether or not TG is already in state.
+          # If VPC mismatches (stale): remove from state + delete from AWS.
+          TG_ARN=$(aws elbv2 describe-target-groups \
+            --names "${ENV}-banking-tg" \
+            --region "$REGION" \
+            --query 'TargetGroups[0].TargetGroupArn' --output text 2>/dev/null)
+          if [ -n "$TG_ARN" ] && [ "$TG_ARN" != "None" ]; then
+            TG_VPC=$(aws elbv2 describe-target-groups \
+              --target-group-arns "$TG_ARN" \
+              --region "$REGION" \
+              --query 'TargetGroups[0].VpcId' --output text 2>/dev/null)
+            if [ -z "$VPC_ID" ] || [ "$VPC_ID" = "None" ] || [ "$TG_VPC" != "$VPC_ID" ]; then
+              echo "  → TG VPC ($TG_VPC) != current VPC ($VPC_ID) — purging from state and AWS..."
+              terraform state rm "module.alb.aws_lb_target_group.app" 2>/dev/null || true
+              terraform state rm "module.alb.aws_lb_listener.http"    2>/dev/null || true
+              # Delete listeners from every ALB that references this TG
+              while IFS= read -r lb_arn; do
+                [ -z "$lb_arn" ] && continue
+                while IFS= read -r l_arn; do
+                  [ -n "$l_arn" ] && aws elbv2 delete-listener \
+                    --listener-arn "$l_arn" --region "$REGION" 2>/dev/null \
+                    && echo "  ✓ deleted listener $l_arn"
+                done < <(aws elbv2 describe-listeners \
+                  --load-balancer-arn "$lb_arn" \
+                  --region "$REGION" \
+                  --query 'Listeners[*].ListenerArn' --output text 2>/dev/null \
+                  | tr '\t' '\n')
+              done < <(aws elbv2 describe-target-groups \
+                --target-group-arns "$TG_ARN" \
+                --region "$REGION" \
+                --query 'TargetGroups[0].LoadBalancerArns[]' --output text 2>/dev/null \
+                | tr '\t' '\n')
+              aws elbv2 delete-target-group \
+                --target-group-arn "$TG_ARN" --region "$REGION" \
+                && echo "  ✓ deleted stale TG" \
+                || echo "  ⚠ TG deletion failed"
+            else
+              tf_import_if_missing "module.alb.aws_lb_target_group.app" "$TG_ARN"
+            fi
+          fi
+
+          # ── ALB (VPC-aware) ───────────────────────────────────────────────
+          ALB_ARN=$(aws elbv2 describe-load-balancers \
+            --names "${ENV}-banking-alb" \
+            --region "$REGION" \
+            --query 'LoadBalancers[0].LoadBalancerArn' --output text 2>/dev/null)
+          if [ -n "$ALB_ARN" ] && [ "$ALB_ARN" != "None" ]; then
+            ALB_VPC=$(aws elbv2 describe-load-balancers \
+              --load-balancer-arns "$ALB_ARN" \
+              --region "$REGION" \
+              --query 'LoadBalancers[0].VpcId' --output text 2>/dev/null)
+            if [ -z "$VPC_ID" ] || [ "$VPC_ID" = "None" ] || [ "$ALB_VPC" != "$VPC_ID" ]; then
+              echo "  → ALB VPC ($ALB_VPC) != current VPC ($VPC_ID) — purging from state and AWS..."
+              terraform state rm "module.alb.aws_lb.main"         2>/dev/null || true
+              terraform state rm "module.alb.aws_lb_listener.http" 2>/dev/null || true
+              while IFS= read -r l_arn; do
+                [ -n "$l_arn" ] && aws elbv2 delete-listener \
+                  --listener-arn "$l_arn" --region "$REGION" 2>/dev/null \
+                  && echo "  ✓ deleted listener $l_arn"
+              done < <(aws elbv2 describe-listeners \
+                --load-balancer-arn "$ALB_ARN" \
+                --region "$REGION" \
+                --query 'Listeners[*].ListenerArn' --output text 2>/dev/null \
+                | tr '\t' '\n')
+              aws elbv2 delete-load-balancer \
+                --load-balancer-arn "$ALB_ARN" --region "$REGION" \
+                && echo "  ✓ deleted stale ALB" || echo "  ⚠ ALB deletion failed"
+            else
+              tf_import_if_missing "module.alb.aws_lb.main" "$ALB_ARN"
+            fi
+          fi
+
+          # ── CloudWatch Log Groups ─────────────────────────────────────────
+          tf_import_if_missing "module.monitoring.aws_cloudwatch_log_group.app" \
+            "/ecs/${ENV}/banking-app"
+          tf_import_if_missing "module.codebuild.aws_cloudwatch_log_group.codebuild" \
+            "/codebuild/${ENV}-banking"
+          tf_import_if_missing "module.vpc.aws_cloudwatch_log_group.flow_logs" \
+            "/aws/vpc/${ENV}-banking-flow-logs"
+
+          # ── CodeBuild ─────────────────────────────────────────────────────
+          tf_import_if_missing "module.codebuild.aws_codebuild_project.banking" \
+            "${ENV}-banking-codebuild"
+          tf_import_if_missing "module.codebuild.aws_codebuild_webhook.banking" \
+            "${ENV}-banking-codebuild"
+          CRED_ARN=$(aws codebuild list-source-credentials \
+            --region "$REGION" \
+            --query 'sourceCredentialsInfos[?serverType==`GITHUB`].arn' \
+            --output text 2>/dev/null)
+          [ -n "$CRED_ARN" ] && [ "$CRED_ARN" != "None" ] && \
+            tf_import_if_missing "module.codebuild.aws_codebuild_source_credential.github" "$CRED_ARN"
+
+          # ── RDS ───────────────────────────────────────────────────────────
+          tf_import_if_missing "module.rds.aws_kms_alias.rds"           "alias/${ENV}-rds"
+          tf_import_if_missing "module.rds.aws_db_parameter_group.main" "${ENV}-banking-pg14"
+
+          # ── RDS DB Subnet Group ───────────────────────────────────────────
+          # Always check VPC — whether or not subnet group is already in state.
+          # If VPC mismatches (stale): remove from state + delete from AWS.
+          SG_VPC=$(aws rds describe-db-subnet-groups \
+            --db-subnet-group-name "${ENV}-banking-db-subnet-group" \
+            --region "$REGION" \
+            --query 'DBSubnetGroups[0].VpcId' --output text 2>/dev/null)
+          if [ -n "$SG_VPC" ] && [ "$SG_VPC" != "None" ]; then
+            if [ -z "$VPC_ID" ] || [ "$VPC_ID" = "None" ] || [ "$SG_VPC" != "$VPC_ID" ]; then
+              echo "  → Subnet group VPC ($SG_VPC) != current VPC ($VPC_ID) — purging from state and AWS..."
+              terraform state rm "module.rds.aws_db_subnet_group.main" 2>/dev/null || true
+              RDS_USING=$(aws rds describe-db-instances \
+                --region "$REGION" \
+                --query "DBInstances[?DBSubnetGroup.DBSubnetGroupName=='${ENV}-banking-db-subnet-group'].DBInstanceIdentifier" \
+                --output text 2>/dev/null)
+              if [ -n "$RDS_USING" ] && [ "$RDS_USING" != "None" ]; then
+                echo "  → RDS instance '$RDS_USING' is blocking — deleting it first (skip-final-snapshot)..."
+                terraform state rm "module.rds.aws_db_instance.main" 2>/dev/null || true
+                aws rds delete-db-instance \
+                  --db-instance-identifier "$RDS_USING" \
+                  --skip-final-snapshot \
+                  --region "$REGION" 2>&1 \
+                  && echo "  ✓ delete initiated, waiting up to 20 min..." \
+                  || echo "  ⚠ delete initiation failed"
+                aws rds wait db-instance-deleted \
+                  --db-instance-identifier "$RDS_USING" \
+                  --region "$REGION" 2>&1 \
+                  && echo "  ✓ RDS instance deleted" \
+                  || echo "  ⚠ wait timed out — subnet group deletion may still fail"
+              fi
+              aws rds delete-db-subnet-group \
+                --db-subnet-group-name "${ENV}-banking-db-subnet-group" \
+                --region "$REGION" \
+                && echo "  ✓ deleted stale RDS subnet group" \
+                || echo "  ⚠ subnet group deletion failed"
+            else
+              tf_import_if_missing "module.rds.aws_db_subnet_group.main" "${ENV}-banking-db-subnet-group"
+            fi
+          fi
+
+          # ── ECS ───────────────────────────────────────────────────────────
+          tf_import_if_missing "module.ecs.aws_ecs_cluster.main" \
+            "${ENV}-banking-cluster"
+          tf_import_if_missing "module.ecs.aws_ecs_service.app" \
+            "${ENV}-banking-cluster/${ENV}-banking-service"
+          tf_import_if_missing "module.ecs.aws_appautoscaling_target.ecs" \
+            "ecs/service/${ENV}-banking-cluster/${ENV}-banking-service/ecs:service:DesiredCount"
+
+          # ── Security Groups ───────────────────────────────────────────────
+          if [ -n "$VPC_ID" ] && [ "$VPC_ID" != "None" ]; then
+            for pair in \
+              "module.security.aws_security_group.alb:${ENV}-alb-sg" \
+              "module.security.aws_security_group.ecs:${ENV}-ecs-sg" \
+              "module.security.aws_security_group.rds:${ENV}-rds-sg"; do
+              ADDR="${pair%%:*}"
+              SG_NAME="${pair##*:}"
+              SG_ID=$(aws ec2 describe-security-groups \
+                --filters "Name=vpc-id,Values=$VPC_ID" "Name=group-name,Values=$SG_NAME" \
+                --region "$REGION" \
+                --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null)
+              [ -n "$SG_ID" ] && [ "$SG_ID" != "None" ] && \
+                tf_import_if_missing "$ADDR" "$SG_ID"
+            done
+          fi
+
+          echo "=== State reconciliation complete ==="
+
       - name: Terraform Format Check
         run: terraform fmt -check -recursive
 
@@ -74,30 +410,42 @@ jobs:
         run: terraform validate
 
       - name: Terraform Plan
+        id: plan
         run: |
           terraform plan \
             -var-file="environments/prod/terraform.tfvars" \
             -out=tfplan
 
-      - name: Terraform Apply
-        run: terraform apply -auto-approve tfplan
+      - name: Create / update CodeBuild project
+        run: |
+          terraform apply -auto-approve tfplan
 
       - name: Verify CodeBuild project created
         run: |
+          echo "Checking if CodeBuild project exists..."
           aws codebuild batch-get-projects \
             --names prod-banking-codebuild \
             --region ${{ secrets.AWS_DEFAULT_REGION }} \
             --query 'projects[0].[name,arn]' \
             --output table
+          
+          if [ $? -eq 0 ]; then
+            echo "✓ CodeBuild project verified"
+          else
+            echo "✗ CodeBuild project not found"
+            exit 1
+          fi
 
       - name: Verify GitHub webhook registered
         run: |
+          echo "Checking if webhook is registered on GitHub repo..."
           WEBHOOK=$(curl -s \
             -H "Authorization: token ${{ secrets.GH_PAT }}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${{ github.repository }}/hooks" \
             | grep -c "codebuild")
-          if [ "$WEBHOOK" -gt 0 ]; then
+          
+          if [ $WEBHOOK -gt 0 ]; then
             echo "✓ GitHub webhook verified"
           else
             echo "⚠️  Webhook not found yet (may take a moment to register)"
@@ -108,84 +456,16 @@ jobs:
           echo "=========================================="
           echo "✓ Bootstrap Complete"
           echo "=========================================="
+          echo ""
+          echo "What happened:"
           echo "  1. AWS infrastructure created via Terraform"
           echo "  2. CodeBuild project: prod-banking-codebuild"
           echo "  3. GitHub webhook registered automatically"
+          echo ""
+          echo "Next steps:"
+          echo "  • Push code to main or feature/codebuild-setup"
+          echo "  • GitHub will automatically trigger CodeBuild"
+          echo "  • Monitor builds: AWS CodeBuild → Build history"
+          echo ""
+          echo "View logs: https://console.aws.amazon.com/codesuite/codebuild/projects"
           echo "=========================================="
-
-  # ── Approval gate before destroy ─────────────────────────────────────────────
-  approve-destroy:
-    name: Wait for Destroy Approval
-    runs-on: ubuntu-latest
-    needs: bootstrap
-    steps:
-      - name: Request manual approval
-        uses: trstringer/manual-approval@v1
-        with:
-          secret: ${{ secrets.GITHUB_TOKEN }}
-          approvers: sriram10412
-          minimum-approvals: 1
-          issue-title: "Approve Terraform Destroy for prod infrastructure"
-          issue-body: |
-            Bootstrap job has completed. Review and approve to destroy all AWS infrastructure.
-            **Approve** by commenting: `approved`
-            **Deny** by commenting: `denied`
-          exclude-workflow-initiator-as-approver: false
-
-  # ── Destroy ───────────────────────────────────────────────────────────────────
-  destroy:
-    name: Terraform Destroy
-    runs-on: ubuntu-latest
-    needs: approve-destroy
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_DEFAULT_REGION }}
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TF_VERSION }}
-
-      - name: Release stale Terraform state lock
-        run: |
-          aws dynamodb delete-item \
-            --table-name banking-app-tfstate-lock \
-            --key '{"LockID": {"S": "banking-app-tfstate/prod/terraform.tfstate"}}' \
-            --region ${{ secrets.AWS_DEFAULT_REGION }} || true
-
-      - name: Terraform Init
-        run: |
-          terraform init \
-            -backend-config="region=${{ secrets.AWS_DEFAULT_REGION }}"
-
-      - name: Clean up ECS task definitions
-        run: |
-          REGION="${{ secrets.AWS_DEFAULT_REGION }}"
-          FAMILY="prod-banking-app"
-          echo "Deregistering and deleting ECS task definitions (family: $FAMILY)..."
-          TASK_DEFS=$(aws ecs list-task-definitions \
-            --family-prefix "$FAMILY" \
-            --region "$REGION" \
-            --query 'taskDefinitionArns[]' --output text 2>/dev/null)
-          for td_arn in $TASK_DEFS; do
-            echo "  deregistering $td_arn"
-            aws ecs deregister-task-definition \
-              --task-definition "$td_arn" --region "$REGION" > /dev/null 2>&1 || true
-            echo "  deleting $td_arn"
-            aws ecs delete-task-definitions \
-              --task-definitions "$td_arn" --region "$REGION" > /dev/null 2>&1 || true
-          done
-          echo "ECS task definition cleanup complete."
-
-      - name: Terraform Destroy
-        run: |
-          terraform destroy \
-            -var-file="environments/prod/terraform.tfvars" \
-            -auto-approve
