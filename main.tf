@@ -43,6 +43,18 @@ provider "aws" {
   }
 }
 
+# These log groups have skip_destroy = true so they outlive terraform destroy.
+# Import blocks are idempotent — no-op when already tracked in state.
+import {
+  to = module.codebuild.aws_cloudwatch_log_group.codebuild
+  id = "/codebuild/prod-banking"
+}
+
+import {
+  to = module.vpc.aws_cloudwatch_log_group.flow_logs
+  id = "/aws/vpc/prod-banking-flow-logs"
+}
+
 # ── VPC ──────────────────────────────────────────────────────────────────────
 module "vpc" {
   source = "./modules/vpc"
