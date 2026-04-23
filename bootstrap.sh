@@ -30,7 +30,7 @@ echo "======================================"
 echo ""
 echo "[1/4] S3 state bucket..."
 BUCKET_CREATED=false
-if [ "${REGION}" = "ap-southeast-1" ]; then
+if [ "${REGION}" = "us-east-1" ]; then
   aws s3api create-bucket --bucket "${BUCKET_NAME}" --region "${REGION}" 2>/dev/null \
     && BUCKET_CREATED=true
 else
