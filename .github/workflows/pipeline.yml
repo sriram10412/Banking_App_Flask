@@ -281,13 +281,36 @@ jobs:
             fi
           fi
 
-          # ── ALB ───────────────────────────────────────────────────────────
+          # ── ALB (VPC-aware) ───────────────────────────────────────────────
           ALB_ARN=$(aws elbv2 describe-load-balancers \
             --names "${ENV}-banking-alb" \
             --region "$REGION" \
             --query 'LoadBalancers[0].LoadBalancerArn' --output text 2>/dev/null)
-          [ -n "$ALB_ARN" ] && [ "$ALB_ARN" != "None" ] && \
-            tf_import_if_missing "module.alb.aws_lb.main" "$ALB_ARN"
+          if [ -n "$ALB_ARN" ] && [ "$ALB_ARN" != "None" ]; then
+            ALB_VPC=$(aws elbv2 describe-load-balancers \
+              --load-balancer-arns "$ALB_ARN" \
+              --region "$REGION" \
+              --query 'LoadBalancers[0].VpcId' --output text 2>/dev/null)
+            if [ -z "$VPC_ID" ] || [ "$VPC_ID" = "None" ] || [ "$ALB_VPC" != "$VPC_ID" ]; then
+              echo "  → ALB VPC ($ALB_VPC) != current VPC ($VPC_ID) — purging from state and AWS..."
+              terraform state rm "module.alb.aws_lb.main"         2>/dev/null || true
+              terraform state rm "module.alb.aws_lb_listener.http" 2>/dev/null || true
+              while IFS= read -r l_arn; do
+                [ -n "$l_arn" ] && aws elbv2 delete-listener \
+                  --listener-arn "$l_arn" --region "$REGION" 2>/dev/null \
+                  && echo "  ✓ deleted listener $l_arn"
+              done < <(aws elbv2 describe-listeners \
+                --load-balancer-arn "$ALB_ARN" \
+                --region "$REGION" \
+                --query 'Listeners[*].ListenerArn' --output text 2>/dev/null \
+                | tr '\t' '\n')
+              aws elbv2 delete-load-balancer \
+                --load-balancer-arn "$ALB_ARN" --region "$REGION" \
+                && echo "  ✓ deleted stale ALB" || echo "  ⚠ ALB deletion failed"
+            else
+              tf_import_if_missing "module.alb.aws_lb.main" "$ALB_ARN"
+            fi
+          fi
 
           # ── CloudWatch Log Groups ─────────────────────────────────────────
           tf_import_if_missing "module.monitoring.aws_cloudwatch_log_group.app" \
@@ -328,15 +351,26 @@ jobs:
                 --region "$REGION" \
                 --query "DBInstances[?DBSubnetGroup.DBSubnetGroupName=='${ENV}-banking-db-subnet-group'].DBInstanceIdentifier" \
                 --output text 2>/dev/null)
-              if [ -z "$RDS_USING" ] || [ "$RDS_USING" = "None" ]; then
-                aws rds delete-db-subnet-group \
-                  --db-subnet-group-name "${ENV}-banking-db-subnet-group" \
-                  --region "$REGION" \
-                  && echo "  ✓ deleted stale RDS subnet group" \
-                  || echo "  ⚠ deletion failed"
-              else
-                echo "  ⚠ RDS instance '$RDS_USING' is using the subnet group — cannot delete"
+              if [ -n "$RDS_USING" ] && [ "$RDS_USING" != "None" ]; then
+                echo "  → RDS instance '$RDS_USING' is blocking — deleting it first (skip-final-snapshot)..."
+                terraform state rm "module.rds.aws_db_instance.main" 2>/dev/null || true
+                aws rds delete-db-instance \
+                  --db-instance-identifier "$RDS_USING" \
+                  --skip-final-snapshot \
+                  --region "$REGION" 2>&1 \
+                  && echo "  ✓ delete initiated, waiting up to 20 min..." \
+                  || echo "  ⚠ delete initiation failed"
+                aws rds wait db-instance-deleted \
+                  --db-instance-identifier "$RDS_USING" \
+                  --region "$REGION" 2>&1 \
+                  && echo "  ✓ RDS instance deleted" \
+                  || echo "  ⚠ wait timed out — subnet group deletion may still fail"
               fi
+              aws rds delete-db-subnet-group \
+                --db-subnet-group-name "${ENV}-banking-db-subnet-group" \
+                --region "$REGION" \
+                && echo "  ✓ deleted stale RDS subnet group" \
+                || echo "  ⚠ subnet group deletion failed"
             else
               tf_import_if_missing "module.rds.aws_db_subnet_group.main" "${ENV}-banking-db-subnet-group"
             fi
